@@ -1,0 +1,13 @@
+{
+  "universe_id": "my_top_stocks",
+  "as_of": "2026-02-23",
+  "tickers": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "SPY",
+    "QQQ"
+  ]
+}
