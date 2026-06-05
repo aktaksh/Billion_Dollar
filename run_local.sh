@@ -4,15 +4,60 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="${ROOT_DIR}/backend"
 FRONTEND_DIR="${ROOT_DIR}/frontend"
+GIT_CODES_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
+PYENV_GLOBAL="${PYENV_GLOBAL:-${GIT_CODES_DIR}/pyenv_global}"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
+BACKEND_DETACH="${BACKEND_DETACH:-1}"
+BACKEND_LOG="${BACKEND_LOG:-${BACKEND_DIR}/.backend.log}"
+BACKEND_PID_FILE="${BACKEND_PID_FILE:-${BACKEND_DIR}/.backend.pid}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 not found. Install Python 3.11/3.12/3.13 and retry."
-  exit 1
-fi
+require_free_port() {
+  local label="$1"
+  local port="$2"
+
+  if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "${label} port ${port} is already in use."
+    echo
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN || true
+    echo
+    echo "Stop the existing process or use a different port, for example:"
+    if [[ "${label}" == "Backend" ]]; then
+      echo "  BACKEND_PORT=8010 ./run_local.sh"
+    else
+      echo "  FRONTEND_PORT=3010 ./run_local.sh"
+    fi
+    exit 1
+  fi
+}
+
+kill_existing_port_process() {
+  local label="$1"
+  local port="$2"
+  local pids
+
+  pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -z "${pids}" ]]; then
+    return
+  fi
+
+  echo "${label} port ${port} is already in use. Stopping existing process(es): ${pids}"
+  kill ${pids} 2>/dev/null || true
+
+  for _ in {1..20}; do
+    if ! lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "${label} port ${port} is free."
+      return
+    fi
+    sleep 0.25
+  done
+
+  echo "${label} port ${port} is still busy. Force-stopping process(es): ${pids}"
+  kill -9 ${pids} 2>/dev/null || true
+  sleep 0.25
+}
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm not found. Install Node.js/npm and retry."
@@ -24,47 +69,68 @@ if [[ ! -d "${BACKEND_DIR}" || ! -d "${FRONTEND_DIR}" ]]; then
   exit 1
 fi
 
+if [[ ! -x "${PYENV_GLOBAL}/bin/python" ]]; then
+  echo "Shared venv not found: ${PYENV_GLOBAL}"
+  echo "Run: python3.12 -m venv ${PYENV_GLOBAL} && source ${PYENV_GLOBAL}/bin/activate && pip install poetry"
+  echo "Then: cd ${BACKEND_DIR} && poetry install"
+  exit 1
+fi
+
 echo "Project root: ${ROOT_DIR}"
+echo "Python env:   ${PYENV_GLOBAL}"
 echo "Backend URL:  http://localhost:${BACKEND_PORT}"
 echo "Frontend URL: http://localhost:${FRONTEND_PORT}"
 echo
 
+kill_existing_port_process "Backend" "${BACKEND_PORT}"
+require_free_port "Backend" "${BACKEND_PORT}"
+require_free_port "Frontend" "${FRONTEND_PORT}"
+
 # --- Backend setup ---
 cd "${BACKEND_DIR}"
+export VIRTUAL_ENV="${PYENV_GLOBAL}"
+export PATH="${PYENV_GLOBAL}/bin:${PATH}"
 
-if [[ ! -d ".venv" ]]; then
-  echo "[backend] Creating virtualenv..."
-  python3 -m venv .venv
-fi
-
-VENV_PY="${BACKEND_DIR}/.venv/bin/python3"
-
-if [[ ! -x "${VENV_PY}" ]]; then
-  echo "[backend] Virtualenv python not found at ${VENV_PY}"
-  echo "[backend] Recreating virtualenv..."
-  rm -rf .venv
-  python3 -m venv .venv
-  VENV_PY="${BACKEND_DIR}/.venv/bin/python3"
-fi
-
-if ! "${VENV_PY}" -c "import sys" >/dev/null 2>&1; then
-  echo "[backend] Virtualenv looks stale after path rename. Recreating..."
-  rm -rf .venv
-  python3 -m venv .venv
-  VENV_PY="${BACKEND_DIR}/.venv/bin/python3"
-fi
-
-if [[ "${SKIP_INSTALL}" != "1" ]]; then
-  echo "[backend] Installing Python dependencies..."
-  # Use python -m pip so we avoid stale pip shebangs after folder moves/renames.
-  "${VENV_PY}" -m pip install -r requirements.txt
+if [[ -f "pyproject.toml" && -x "${PYENV_GLOBAL}/bin/poetry" ]]; then
+  if [[ "${SKIP_INSTALL}" != "1" ]]; then
+    echo "[backend] Installing dependencies with Poetry (pyenv_global)..."
+    poetry install
+  else
+    echo "[backend] SKIP_INSTALL=1, skipping poetry install."
+  fi
+  if [[ "${BACKEND_DETACH}" == "1" ]]; then
+    echo "[backend] Starting API server detached..."
+    nohup poetry run uvicorn app.main:app --reload --port "${BACKEND_PORT}" > "${BACKEND_LOG}" 2>&1 &
+    BACKEND_PID=$!
+    echo "${BACKEND_PID}" > "${BACKEND_PID_FILE}"
+    echo "[backend] PID ${BACKEND_PID}; log: ${BACKEND_LOG}"
+  else
+    echo "[backend] Starting API server..."
+    poetry run uvicorn app.main:app --reload --port "${BACKEND_PORT}" &
+    BACKEND_PID=$!
+  fi
 else
-  echo "[backend] SKIP_INSTALL=1, skipping pip install."
+  echo "[backend] Poetry/pyproject.toml not available; using pip + requirements.txt"
+  if [[ "${SKIP_INSTALL}" != "1" ]]; then
+    "${PYENV_GLOBAL}/bin/pip" install -r requirements.txt
+  fi
+  if [[ "${BACKEND_DETACH}" == "1" ]]; then
+    echo "[backend] Starting API server detached..."
+    nohup "${PYENV_GLOBAL}/bin/python" -m uvicorn app.main:app --reload --port "${BACKEND_PORT}" > "${BACKEND_LOG}" 2>&1 &
+    BACKEND_PID=$!
+    echo "${BACKEND_PID}" > "${BACKEND_PID_FILE}"
+    echo "[backend] PID ${BACKEND_PID}; log: ${BACKEND_LOG}"
+  else
+    "${PYENV_GLOBAL}/bin/python" -m uvicorn app.main:app --reload --port "${BACKEND_PORT}" &
+    BACKEND_PID=$!
+  fi
 fi
 
-echo "[backend] Starting API server..."
-"${VENV_PY}" -m uvicorn app.main:app --reload --port "${BACKEND_PORT}" &
-BACKEND_PID=$!
+sleep 1
+if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
+  echo "[backend] Failed to start. Check log: ${BACKEND_LOG}"
+  exit 1
+fi
 
 # --- Frontend setup ---
 cd "${FRONTEND_DIR}"
@@ -82,19 +148,29 @@ FRONTEND_PID=$!
 
 cleanup() {
   echo
-  echo "Stopping services..."
-  kill "${BACKEND_PID}" "${FRONTEND_PID}" 2>/dev/null || true
+  echo "Stopping frontend..."
+  kill "${FRONTEND_PID}" 2>/dev/null || true
+  if [[ "${BACKEND_DETACH}" == "1" ]]; then
+    echo "Backend is still running on port ${BACKEND_PORT} (PID ${BACKEND_PID})."
+    echo "Stop it with: kill ${BACKEND_PID}"
+  else
+    echo "Stopping backend..."
+    kill "${BACKEND_PID}" 2>/dev/null || true
+  fi
 }
 
 trap cleanup EXIT INT TERM
 
 echo
-echo "Stock Tiger is starting..."
-echo "Press Ctrl+C to stop both services."
+echo "Billion Dollar is starting..."
+if [[ "${BACKEND_DETACH}" == "1" ]]; then
+  echo "Backend is detached and will keep running if this terminal closes."
+  echo "Press Ctrl+C to stop the frontend only."
+else
+  echo "Press Ctrl+C to stop both services."
+fi
 echo
 
-# macOS default Bash (3.2) does not support `wait -n`.
-# Poll PIDs and exit when either process stops.
 while true; do
   if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
     wait "${BACKEND_PID}" 2>/dev/null || true

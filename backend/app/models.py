@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 TradingMode = Literal["paper", "micro_live", "normal_live"]
 SignalSide = Literal["bullish", "bearish", "neutral"]
 QuoteType = Literal["real_time", "delayed", "snapshot"]
+DataStatus = Literal["live", "stale", "mock", "degraded", "disconnected"]
+ExecutionMode = Literal["paper_only", "read_only", "manual_approval", "close_only", "halted"]
 DataHealth = Literal["OK", "Degraded", "Blocked"]
 TickerState = Literal[
     "NoSignal",
@@ -28,6 +30,9 @@ class HealthResponse(BaseModel):
     app: str
     version: str
     timestamp: datetime
+    as_of: datetime
+    execution_mode: ExecutionMode = "paper_only"
+    data_status: DataStatus = "live"
 
 
 class Recommendation(BaseModel):
@@ -65,7 +70,20 @@ class EventSummary(BaseModel):
 
 
 ExplainSeverity = Literal["info", "warn", "block"]
-ExplainCategory = Literal["data", "news", "signal", "structure", "risk", "approval", "execution", "reconcile", "system"]
+ExplainCategory = Literal[
+    "data",
+    "news",
+    "signal",
+    "structure",
+    "risk",
+    "approval",
+    "execution",
+    "reconcile",
+    "broker",
+    "paper",
+    "review",
+    "system",
+]
 
 
 class ExplainFeedItem(BaseModel):
@@ -76,6 +94,10 @@ class ExplainFeedItem(BaseModel):
     severity: ExplainSeverity = "info"
     category: ExplainCategory = "system"
     step: str
+    human_message: str = ""
+    event_type: str = ""
+    scope: Literal["global", "ticker", "decision", "risk", "broker", "paper", "review"] = "global"
+    linked_decision_id: str | None = None
     refs: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -307,11 +329,44 @@ class StrategyHealthRow(BaseModel):
 
 
 class TradeReviewItem(BaseModel):
-    occurred_at: datetime
-    issue_type: str
-    severity: Literal["low", "medium", "high"]
-    aggregate_id: str
-    message: str
+    decision_id: str
+    symbol: str
+    strategy_type: str
+    direction: str
+    created_at: datetime
+    closed_at: datetime | None = None
+    original_score: float = 0.0
+    risk_status: str = "unknown"
+    max_loss: float | None = None
+    max_profit: float | None = None
+    final_pnl: float | None = None
+    final_pnl_percent: float | None = None
+    max_drawdown: float | None = None
+    time_in_trade: str | None = None
+    outcome: str | None = None
+    lesson: str | None = None
+    review_status: str = "pending"
+    thesis: str | None = None
+    entry_trigger: str | None = None
+    invalidation_rule: str | None = None
+    profit_plan: str | None = None
+    rule_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    market_regime: str | None = None
+    technical_score: float | None = None
+    catalyst_score: float | None = None
+    liquidity_score: float | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
+    entry_trigger_met: bool | None = None
+    invalidation_hit: bool | None = None
+    profit_target_hit: bool | None = None
+    exit_followed_plan: bool | None = None
+    # legacy override queue fields
+    occurred_at: datetime | None = None
+    issue_type: str | None = None
+    severity: Literal["low", "medium", "high"] | None = None
+    aggregate_id: str | None = None
+    message: str | None = None
 
 
 class UniverseValidationResult(BaseModel):
@@ -384,8 +439,20 @@ class WatchlistOpportunity(BaseModel):
     earnings_date: str | None = None
     earnings_certainty: Literal["high", "medium", "low", "unknown"] = "unknown"
     last_snapshot_ts: datetime | None = None
+    suggested_strategy: str | None = None
+    max_loss: float | None = None
+    pop: float | None = None
+    liquidity: str = "unknown"
+    review_status: str = "pending"
+    decision_id: str | None = None
+    decision_status: str | None = None
+    signal_id: str | None = None
     next_action: Literal[
         "view_trade_card",
+        "save_decision",
+        "run_replay",
+        "run_paper",
+        "reject",
         "build_structure",
         "run_risk",
         "request_approval",
@@ -397,10 +464,20 @@ class WatchlistOpportunity(BaseModel):
 class TradeCardResponse(BaseModel):
     ticker: str
     state: TickerState
+    direction: str | None = None
+    strategy_type: str | None = None
+    risk_status: str | None = None
+    data_status: DataStatus = "disconnected"
+    broker_status: str = "disconnected"
+    reconcile_status: str = "ok"
+    decision_id: str | None = None
     last_price: float | None = None
     snapshot_timestamps: dict[str, str] = Field(default_factory=dict)
     thesis: dict[str, Any] = Field(default_factory=dict)
     why_now_deltas: list[str] = Field(default_factory=list)
+    decision_summary: dict[str, Any] = Field(default_factory=dict)
+    trade_plan: dict[str, Any] = Field(default_factory=dict)
+    strategy_legs: list[dict[str, Any]] = Field(default_factory=list)
     confidence_total: float = 0.0
     confidence_components: dict[str, float] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
@@ -412,15 +489,24 @@ class TradeCardResponse(BaseModel):
 
 
 class PositionRow(BaseModel):
+    decision_id: str | None = None
     ticker: str
     strategy_label: str | None = None
+    direction: str | None = None
     qty: float
     avg_price: float | None = None
+    current_price: float | None = None
     last_price: float | None = None
     pnl_daily: float = 0.0
     pnl_total: float = 0.0
+    pnl_percent: float = 0.0
+    max_drawdown: float = 0.0
     dte: int | None = None
     breakeven: float | None = None
+    entry_trigger: str | None = None
+    invalidation_rule: str | None = None
+    profit_plan: str | None = None
+    current_action: Literal["hold", "take_partial_profit", "close", "watch_invalidation", "review_required"] = "hold"
     alerts: list[str] = Field(default_factory=list)
 
 
@@ -430,8 +516,11 @@ class PositionsResponse(BaseModel):
 
 
 class BlotterRow(BaseModel):
+    decision_id: str | None = None
     order_intent_id: str
     ticker: str
+    strategy_type: str | None = None
+    direction: str | None = None
     structure_label: str | None = None
     legs_summary: list[str] = Field(default_factory=list)
     created_ts: datetime
@@ -441,8 +530,10 @@ class BlotterRow(BaseModel):
     status: str
     status_timeline: list[str] = Field(default_factory=list)
     fills: list[dict[str, Any]] = Field(default_factory=list)
+    fill_price: float | None = None
     fees_usd: float = 0.0
     slippage_vs_expected_usd: float = 0.0
+    review_status: str = "pending"
     broker_reject_reason: str | None = None
 
 
@@ -570,4 +661,366 @@ class OrderIntentCreatedIn(BaseModel):
             raise ValueError(f"snapshot_refs missing required keys: {', '.join(missing)}")
         return self
 
+
+class StrategyOptionLegIn(BaseModel):
+    expiry: str
+    dte: int
+    option_type: Literal["call", "put"]
+    strike: float
+    bid: float
+    ask: float
+    volume: int = 0
+    open_interest: int = 0
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
+    iv: float = 0.0
+
+
+class StrategyBuilderCandidatesIn(BaseModel):
+    symbol: str
+    direction: Literal["bullish", "bearish"]
+    last_price: float
+    feature: dict[str, Any] = Field(default_factory=dict)
+    option_chain: list[StrategyOptionLegIn] = Field(default_factory=list, min_length=1)
+    reconciliation_mismatch_active: bool = False
+    thresholds: dict[str, float] = Field(default_factory=dict)
+
+
+class StrategyCandidateOut(BaseModel):
+    symbol: str
+    strategy_type: str
+    direction: str
+    expiry: str
+    dte: int
+    legs: list[dict[str, Any]] = Field(default_factory=list)
+    debit_or_credit: float
+    max_profit: float
+    max_loss: float
+    breakeven: float
+    probability_profit: float
+    expected_value: float
+    alpha_score: float
+    beta_score: float
+    gamma_score: float
+    liquidity_score: float
+    strategy_score: float
+    risk_status: Literal["allow", "reject", "override_required"]
+    rule_reasons: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyBuilderCandidatesOut(BaseModel):
+    symbol: str
+    direction: Literal["bullish", "bearish"]
+    candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+
+
+class IngestionRunIn(BaseModel):
+    tickers: list[str] = Field(default_factory=list, max_length=200)
+    include_news: bool = True
+
+
+class IngestionTickerSummary(BaseModel):
+    ticker: str
+    market_snapshot_event_id: str
+    option_chain_event_id: str
+    context_snapshot_event_id: str
+    data_status: DataStatus = "live"
+    chain_source: Literal["broker", "mock", "none"] = "mock"
+
+
+class IngestionRunOut(BaseModel):
+    run_id: str
+    processed: int
+    results: list[IngestionTickerSummary] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+
+
+class FeatureBuildIn(BaseModel):
+    tickers: list[str] = Field(default_factory=list, max_length=200)
+
+
+class FeatureRow(BaseModel):
+    ticker: str
+    feature_event_id: str
+    feature: dict[str, Any]
+
+
+class FeatureBuildOut(BaseModel):
+    run_id: str
+    built: int
+    results: list[FeatureRow] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+
+
+class StrategyRuntimeIn(BaseModel):
+    ticker: str
+    direction: Literal["bullish", "bearish"]
+    reconciliation_mismatch_active: bool = False
+    thresholds: dict[str, float] = Field(default_factory=dict)
+
+
+class StrategyRuntimeOut(BaseModel):
+    ticker: str
+    direction: Literal["bullish", "bearish"]
+    feature_snapshot_ref: str
+    option_chain_snapshot_ref: str
+    candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+    runtime_allowed: bool = True
+    runtime_block_reason: str | None = None
+
+
+class ReplayRunIn(BaseModel):
+    ticker: str
+    direction: Literal["bullish", "bearish"]
+    scenarios: list[float] = Field(default_factory=lambda: [-0.04, -0.02, 0.0, 0.02, 0.04], min_length=1, max_length=25)
+
+
+class ReplayCandidateResult(BaseModel):
+    strategy_type: str
+    risk_status: str
+    strategy_score: float
+    probability_profit: float
+    expected_value: float
+    replay_avg_pnl: float
+    scenario_pnls: list[float] = Field(default_factory=list)
+
+
+class ReplayRunOut(BaseModel):
+    ticker: str
+    direction: Literal["bullish", "bearish"]
+    scenarios: list[float]
+    results: list[ReplayCandidateResult] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+
+
+class PaperTradeRunIn(BaseModel):
+    mode: Literal["decision", "quick"] = "decision"
+    decision_id: str | None = None
+    ticker: str | None = None
+    direction: Literal["bullish", "bearish"] | None = None
+    scenario_return: float = 0.015
+
+
+class PaperTradeRunOut(BaseModel):
+    mode: Literal["decision", "quick"] = "decision"
+    decision_id: str | None = None
+    ticker: str
+    direction: Literal["bullish", "bearish"]
+    signal_id: str
+    order_intent_id: str
+    position_event_id: str
+    close_event_id: str
+    entry_price: float
+    exit_price: float
+    realized_pnl_after_costs_usd: float
+    realized_pnl_percent: float = 0.0
+    max_drawdown: float = 0.0
+    fees_usd: float
+    slippage_usd: float
+    lifecycle: list[str] = Field(default_factory=list)
+    as_of: datetime
+    data_status: DataStatus = "live"
+
+
+class ShellStatusOut(BaseModel):
+    as_of: datetime
+    broker_connected: bool
+    broker_authenticated: bool
+    data_status: DataStatus
+    execution_mode: ExecutionMode
+    trading_mode: TradingMode
+    reconcile_worker_status: str
+    reconcile_blocking_count: int
+    can_open_new_entries: bool
+    active_halts: list[str] = Field(default_factory=list)
+    runtime_block_reason: str | None = None
+
+
+class OpsMetricsOut(BaseModel):
+    as_of: datetime
+    requests: dict[str, int] = Field(default_factory=dict)
+    errors: dict[str, int] = Field(default_factory=dict)
+
+
+class BrokerStatusOut(BaseModel):
+    as_of: datetime
+    tws_reachable: bool
+    broker_connected: bool
+    broker_authenticated: bool
+    data_status: DataStatus
+    tws_host: str
+    tws_port: int
+    tws_client_id: int
+    tws_read_only: bool
+    connection_worker_status: str
+    message: str
+    next_action: str
+
+
+class BrokerConnectOut(BaseModel):
+    as_of: datetime
+    status: Literal["connected", "tws_unreachable", "error"]
+    message: str
+    next_action: str
+    data_status: DataStatus
+    ingestion_processed: int = 0
+    steps: list[str] = Field(default_factory=list)
+
+
+DecisionCurrentStatus = Literal[
+    "candidate_generated",
+    "decision_saved",
+    "replayed",
+    "paper_order_created",
+    "paper_filled",
+    "position_open",
+    "position_closed",
+    "skipped",
+    "rejected",
+]
+
+DecisionReviewStatus = Literal["pending", "ready_for_review", "reviewed"]
+
+DecisionFinalOutcome = Literal[
+    "correct",
+    "partially_correct",
+    "wrong",
+    "invalid_entry",
+    "invalid_exit",
+    "skipped_trigger_not_met",
+    "not_reviewed",
+]
+
+
+class TradeDecisionSaveIn(BaseModel):
+    candidate: StrategyCandidateOut
+    symbol: str
+    direction: Literal["bullish", "bearish"]
+    signal_id: str | None = None
+    universe: str | None = None
+    confidence: float = Field(ge=0.0, le=100.0, default=50.0)
+    edge: float = 0.0
+    market_regime: str = "unknown"
+    thesis: str = ""
+    feature: dict[str, Any] = Field(default_factory=dict)
+    data_status: DataStatus = "mock"
+    broker_status: str = "disconnected"
+    reconciliation_status: str = "ok"
+    rejected: bool = False
+
+
+class TradeDecisionPatchIn(BaseModel):
+    current_status: DecisionCurrentStatus | None = None
+    review_status: DecisionReviewStatus | None = None
+    final_outcome: DecisionFinalOutcome | None = None
+    lesson: str | None = None
+    replay_avg_pnl: float | None = None
+    rejected: bool = False
+
+
+class TradeDecisionOut(BaseModel):
+    decision_id: str
+    created_at: datetime
+    updated_at: datetime
+    symbol: str
+    universe: str | None = None
+    signal_id: str | None = None
+    direction: str
+    strategy_type: str
+    risk_status: str
+    confidence: float
+    score: float
+    edge: float
+    market_regime: str | None = None
+    technical_score: float | None = None
+    catalyst_score: float | None = None
+    liquidity_score: float | None = None
+    risk_score: float | None = None
+    max_loss: float | None = None
+    max_profit: float | None = None
+    breakeven: float | None = None
+    probability_profit: float | None = None
+    expected_value: float | None = None
+    entry_trigger: str | None = None
+    invalidation_rule: str | None = None
+    profit_plan: str | None = None
+    thesis: str | None = None
+    rule_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    legs: list[dict[str, Any]] = Field(default_factory=list)
+    data_status: DataStatus = "mock"
+    broker_status: str = "disconnected"
+    reconciliation_status: str = "ok"
+    paper_order_id: str | None = None
+    paper_position_id: str | None = None
+    paper_pnl: float | None = None
+    paper_pnl_percent: float | None = None
+    max_drawdown: float | None = None
+    current_status: DecisionCurrentStatus = "decision_saved"
+    review_status: DecisionReviewStatus = "pending"
+    final_outcome: DecisionFinalOutcome | None = None
+    lesson: str | None = None
+    closed_at: datetime | None = None
+    replay_avg_pnl: float | None = None
+
+
+class DashboardDecisionQuality(BaseModel):
+    total_decisions_today: int = 0
+    paper_trades_opened: int = 0
+    open_paper_positions: int = 0
+    decisions_ready_for_review: int = 0
+    reviewed_decisions: int = 0
+    win_rate: float = 0.0
+    avg_paper_pnl_percent: float = 0.0
+    avg_max_drawdown: float = 0.0
+    best_strategy: str = "n/a"
+    worst_strategy: str = "n/a"
+    most_common_reject_reason: str = "n/a"
+    engine_accuracy: float = 0.0
+
+
+class DashboardSummaryOut(BaseModel):
+    as_of: datetime
+    decision_quality: DashboardDecisionQuality
+    shell: ShellStatusOut | None = None
+
+
+class EnrichedRecommendation(BaseModel):
+    signal_id: str
+    ticker: str
+    strategy: str
+    direction: str
+    confidence: float
+    edge: float
+    max_loss: float | None = None
+    max_profit: float | None = None
+    pop: float | None = None
+    risk_status: str = "unknown"
+    decision_status: str = "none"
+    decision_id: str | None = None
+    regime_label: str = "unknown"
+    thesis: str = ""
+    entry_trigger: str = "not_ready"
+    invalidation_rule: str = "not_ready"
+    liquidity_status: str = "unknown"
+    reason_preview: list[str] = Field(default_factory=list)
+
+
+class TradeReviewCompleteIn(BaseModel):
+    final_outcome: DecisionFinalOutcome
+    lesson: str = ""
+
+
+class TradeReviewClassifyOut(BaseModel):
+    decision_id: str
+    final_outcome: DecisionFinalOutcome
+    review_status: DecisionReviewStatus
 

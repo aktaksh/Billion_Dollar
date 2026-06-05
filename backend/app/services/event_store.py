@@ -245,6 +245,67 @@ def _event_to_explain_item(row: dict[str, Any]) -> ExplainFeedItem | None:
         severity = "block"
         reason = str(payload.get("reason_code", "HALT"))
         step = f"Trading halt active: {reason}"
+    elif event_type == "SymbolFeatureSnapshotBuilt":
+        category = "signal"
+        conf = _format_float(payload.get("confidence_total", payload.get("feature", {}).get("confidence_total")), 1)
+        regime = str(payload.get("regime_label", payload.get("feature", {}).get("regime_label", "unknown")))
+        edge = _format_float(payload.get("expected_edge_after_cost_usd", payload.get("feature", {}).get("post_cost_edge_usd")))
+        sym = ticker or str(payload.get("symbol", ""))
+        step = f"{sym} feature snapshot updated"
+        human = (
+            f"{sym} feature snapshot updated. Confidence {conf}. Regime {regime}. "
+            f"Post-cost edge {edge}. Candidate signal is active."
+        )
+    elif event_type == "OptionsChainSnapshotCaptured":
+        category = "data"
+        sym = ticker or str(payload.get("ticker", ""))
+        chain_source = str(payload.get("chain_source", "broker"))
+        step = f"{sym} option chain refreshed ({chain_source})"
+        human = (
+            f"{sym} option chain refreshed. Liquidity check passed. "
+            "Contracts are eligible for defined-risk strategy review."
+        )
+    elif event_type == "ContextSnapshotCaptured":
+        category = "data"
+        sym = ticker or str(payload.get("ticker", ""))
+        regime = str(payload.get("risk_regime", "unknown"))
+        step = f"{sym} context snapshot captured"
+        human = f"{sym} market context updated. Risk regime {regime}."
+    elif event_type == "MarketSnapshotCaptured":
+        category = "data"
+        sym = ticker or str(payload.get("ticker", ""))
+        last = _format_float(payload.get("last"))
+        step = f"{sym} market snapshot captured @ {last}"
+        human = f"{sym} quote snapshot captured. Last ${last}."
+    elif event_type == "TradeDecisionSaved":
+        category = "signal"
+        step = "Trade decision saved"
+        human = f"Decision {payload.get('decision_id')} saved for {payload.get('symbol')} ({payload.get('strategy_type')})."
+    elif event_type == "PositionClosed":
+        category = "paper"
+        sym = ticker or str(payload.get("ticker", ""))
+        pnl = _format_float(payload.get("realized_pnl_after_costs_usd"))
+        step = f"{sym} paper position closed P/L ${pnl}"
+        human = f"{sym} paper position closed with realized P/L ${pnl}. Ready for review."
+
+    linked_decision_id = payload.get("decision_id")
+    if linked_decision_id:
+        refs["decision_id"] = linked_decision_id
+    scope_map = {
+        "data": "ticker",
+        "signal": "ticker",
+        "structure": "ticker",
+        "risk": "risk",
+        "execution": "paper",
+        "reconcile": "broker",
+        "approval": "decision",
+        "broker": "broker",
+        "paper": "paper",
+        "review": "review",
+        "system": "global",
+    }
+    scope = scope_map.get(category, "global")
+    human_message = locals().get("human", step)
 
     return ExplainFeedItem(
         event_id=str(row.get("event_id", "")),
@@ -254,6 +315,10 @@ def _event_to_explain_item(row: dict[str, Any]) -> ExplainFeedItem | None:
         severity=severity,  # type: ignore[arg-type]
         category=category,  # type: ignore[arg-type]
         step=step,
+        human_message=human_message,
+        event_type=event_type,
+        scope=scope,  # type: ignore[arg-type]
+        linked_decision_id=str(linked_decision_id) if linked_decision_id else None,
         refs=refs,
     )
 
@@ -265,6 +330,8 @@ def explain_feed_view(
     limit: int = 50,
     correlation_id: str | None = None,
     minutes: int | None = None,
+    scope: str | None = None,
+    decision_id: str | None = None,
 ) -> list[ExplainFeedItem]:
     stmt = select(event_log).order_by(desc(event_log.c.seq_id)).limit(max(1, min(500, limit * 8)))
     target_ticker = ticker.strip().upper() if ticker else None
@@ -280,6 +347,10 @@ def explain_feed_view(
             if not item:
                 continue
             if target_ticker and item.ticker != target_ticker:
+                continue
+            if scope and scope != "global" and item.scope != scope:
+                continue
+            if decision_id and item.linked_decision_id != decision_id:
                 continue
             if min_ts and item.ts < min_ts:
                 continue
@@ -478,6 +549,9 @@ def _latest_structure_by_signal(engine: Engine) -> dict[str, dict[str, Any]]:
 
 
 def watchlist_view(engine: Engine) -> list[WatchlistOpportunity]:
+    from app.engines.decision_builder import _entry_trigger, _invalidation_rule
+    from app.services.decision_store import list_decisions
+
     active = active_universe_view(engine)
     tickers = active.tickers if active else []
     signal_by_ticker = _latest_signal_by_ticker(engine)
@@ -485,6 +559,7 @@ def watchlist_view(engine: Engine) -> list[WatchlistOpportunity]:
     risk_by_signal = _latest_risk_by_signal(engine)
     approval_request_by_signal = _latest_approval_request_by_signal(engine)
     approval_by_signal = _latest_approval_by_signal(engine)
+    decisions_by_symbol = {str(d["symbol"]).upper(): d for d in list_decisions(engine, limit=500)}
     structure_by_signal = _latest_structure_by_signal(engine)
     order_by_signal = _latest_order_by_signal(engine)
     out: list[WatchlistOpportunity] = []
@@ -568,6 +643,32 @@ def watchlist_view(engine: Engine) -> list[WatchlistOpportunity]:
         if health == "Blocked":
             next_action = "blocked"
 
+        dec = decisions_by_symbol.get(ticker.upper())
+        direction = str(signal.get("side", "bullish")) if signal else "bullish"
+        if direction == "neutral":
+            direction = "bullish"
+        if dec and dec.get("entry_trigger"):
+            entry_zone = str(dec["entry_trigger"])
+        elif signal:
+            if str(signal.get("entry_zone", "")).lower() in ("auto", "n/a", ""):
+                entry_zone = _entry_trigger(symbol=ticker, direction=direction, regime=regime, feature=None)
+            else:
+                entry_zone = str(signal.get("entry_zone"))
+        else:
+            entry_zone = "not_ready"
+        if dec and dec.get("invalidation_rule"):
+            invalidation = str(dec["invalidation_rule"])
+        elif signal:
+            if str(signal.get("invalidation", "")).lower() in ("auto", "n/a", ""):
+                invalidation = _invalidation_rule(symbol=ticker, direction=direction, max_loss=500.0)
+            else:
+                invalidation = str(signal.get("invalidation"))
+        else:
+            invalidation = "not_ready"
+
+        liq_score = float(dec.get("liquidity_score", 0)) if dec else 0.0
+        liquidity = "ok" if liq_score >= 55 else ("degraded" if liq_score >= 35 else "check")
+
         out.append(
             WatchlistOpportunity(
                 ticker=ticker,
@@ -587,7 +688,15 @@ def watchlist_view(engine: Engine) -> list[WatchlistOpportunity]:
                 earnings_date=None,
                 earnings_certainty="unknown",
                 last_snapshot_ts=last_snapshot_ts,
-                next_action=next_action,  # type: ignore[arg-type]
+                suggested_strategy=str(dec.get("strategy_type")) if dec else (str(signal.get("strategy_sleeve")) if signal else None),
+                max_loss=float(dec["max_loss"]) if dec and dec.get("max_loss") is not None else None,
+                pop=float(dec["probability_profit"]) if dec and dec.get("probability_profit") is not None else None,
+                liquidity=liquidity,
+                review_status=str(dec.get("review_status", "pending")) if dec else "pending",
+                decision_id=dec.get("decision_id") if dec else None,
+                decision_status=str(dec.get("current_status")) if dec else None,
+                signal_id=signal_id or None,
+                next_action="save_decision" if signal and not dec else next_action,  # type: ignore[arg-type]
             )
         )
 
@@ -595,10 +704,15 @@ def watchlist_view(engine: Engine) -> list[WatchlistOpportunity]:
 
 
 def trade_card_view(engine: Engine, ticker: str) -> TradeCardResponse:
+    from app.services.decision_store import list_decisions
+
     watchlist = watchlist_view(engine)
     item = next((row for row in watchlist if row.ticker.upper() == ticker.upper()), None)
     if not item:
         return TradeCardResponse(ticker=ticker.upper(), state="NoSignal")
+
+    dec_rows = list_decisions(engine, symbol=ticker, limit=1)
+    dec = dec_rows[0] if dec_rows else None
 
     recent_rows: list[dict[str, Any]] = []
     stmt = select(event_log).order_by(desc(event_log.c.seq_id)).limit(500)
@@ -664,24 +778,51 @@ def trade_card_view(engine: Engine, ticker: str) -> TradeCardResponse:
         }
 
     thesis = {
-        "setup_name": "bull_call_spread",
+        "setup_name": dec.get("strategy_type") if dec else "bull_call_spread",
+        "why_exists": dec.get("thesis") if dec else f"Candidate signal for {item.ticker} in {item.regime_label} regime",
+        "market_regime": item.regime_label,
+        "technical_reason": f"Confidence {item.confidence_total:.1f} with post-cost edge ${item.post_cost_edge_usd:.2f}",
+        "catalyst_reason": "News/catalyst score pending TWS tick 292 integration",
+        "options_liquidity_reason": f"Liquidity: {item.liquidity}",
+        "risk_reason": dec.get("risk_status") if dec else "pending structure review",
         "entry_zone": item.entry_zone,
         "invalidation": item.invalidation,
         "target": item.target,
         "hold_period": item.hold_period,
     }
+    trade_plan = {
+        "entry_trigger": item.entry_zone,
+        "invalidation_rule": item.invalidation,
+        "profit_plan": dec.get("profit_plan") if dec else f"Target {item.target}",
+        "max_loss": dec.get("max_loss") if dec else item.max_loss,
+        "max_profit": dec.get("max_profit") if dec else None,
+        "pop": dec.get("probability_profit") if dec else item.pop,
+        "expected_value": dec.get("expected_value") if dec else None,
+        "before_entry": "Confirm data_status live, reconcile clear, and entry trigger met",
+    }
     why_now = [
         f"Regime: {item.regime_label}",
         f"Confidence: {item.confidence_total:.1f}",
         f"Post-cost edge: {item.post_cost_edge_usd:.2f} USD",
+        f"Suggested strategy: {item.suggested_strategy or 'pending'}",
     ]
     return TradeCardResponse(
         ticker=item.ticker,
         state=item.state,
+        direction=str(dec.get("direction")) if dec else None,
+        strategy_type=str(dec.get("strategy_type")) if dec else item.suggested_strategy,
+        risk_status=str(dec.get("risk_status")) if dec else None,
+        data_status=str(dec.get("data_status", "mock")) if dec else "mock",  # type: ignore[arg-type]
+        broker_status=str(dec.get("broker_status", "disconnected")) if dec else "disconnected",
+        reconcile_status=str(dec.get("reconciliation_status", "ok")) if dec else "ok",
+        decision_id=dec.get("decision_id") if dec else item.decision_id,
         last_price=None,
         snapshot_timestamps={},
         thesis=thesis,
         why_now_deltas=why_now,
+        decision_summary=thesis,
+        trade_plan=trade_plan,
+        strategy_legs=list(dec.get("legs", [])) if dec else [],
         confidence_total=item.confidence_total,
         confidence_components=item.confidence_components,
         warnings=warnings,
@@ -739,6 +880,13 @@ def _latest_candidate_by_signal(engine: Engine) -> dict[str, dict]:
 
 
 def positions_view(engine: Engine) -> PositionsResponse:
+    from app.services.decision_store import get_decision, list_decisions
+
+    decision_by_order: dict[str, dict] = {}
+    for d in list_decisions(engine, limit=500):
+        if d.get("paper_order_id"):
+            decision_by_order[str(d["paper_order_id"])] = d
+        decision_by_order[str(d.get("decision_id", ""))] = d
     opened = _latest_events_by_type(engine, "PositionOpened", limit=500)
     closed = _latest_events_by_type(engine, "PositionClosed", limit=500)
     closed_signal_ids = {
@@ -772,17 +920,34 @@ def positions_view(engine: Engine) -> PositionsResponse:
         if health_reason and _health != "OK":
             alerts.append("exit_rule_triggered")
         qty = float(payload.get("qty_opened", payload.get("qty", 0.0)))
+        decision_id = payload.get("decision_id")
+        dec = get_decision(engine, str(decision_id)) if decision_id else decision_by_order.get(str(payload.get("open_order_intent_id", "")))
+        avg_entry = float(payload.get("avg_entry_price", 0.0)) if payload.get("avg_entry_price") else None
+        pnl_total = float(payload.get("unrealized_pnl_usd", payload.get("realized_pnl_after_costs_usd", 0.0)))
+        pnl_pct = float(dec.get("paper_pnl_percent", 0.0)) if dec else 0.0
+        current_action = "review_required" if dec and dec.get("review_status") == "ready_for_review" else "hold"
+        if "invalidation_breached" in alerts:
+            current_action = "watch_invalidation"
         rows.append(
             PositionRow(
+                decision_id=str(decision_id or (dec.get("decision_id") if dec else None)) or None,
                 ticker=ticker,
-                strategy_label=payload.get("strategy_label"),
+                strategy_label=payload.get("strategy_label") or (dec.get("strategy_type") if dec else None),
+                direction=str(dec.get("direction")) if dec else None,
                 qty=qty,
-                avg_price=float(payload.get("avg_entry_price", 0.0)) if payload.get("avg_entry_price") else None,
+                avg_price=avg_entry,
+                current_price=float(last_price) if last_price is not None else None,
                 last_price=float(last_price) if last_price is not None else None,
                 pnl_daily=0.0,
-                pnl_total=float(payload.get("unrealized_pnl_usd", 0.0)),
+                pnl_total=pnl_total,
+                pnl_percent=pnl_pct,
+                max_drawdown=float(dec.get("max_drawdown", 0.0)) if dec else 0.0,
                 dte=payload.get("dte"),
-                breakeven=payload.get("breakeven"),
+                breakeven=payload.get("breakeven") or (dec.get("breakeven") if dec else None),
+                entry_trigger=dec.get("entry_trigger") if dec else None,
+                invalidation_rule=dec.get("invalidation_rule") if dec else None,
+                profit_plan=dec.get("profit_plan") if dec else None,
+                current_action=current_action,  # type: ignore[arg-type]
                 alerts=alerts,
             )
         )
@@ -790,6 +955,9 @@ def positions_view(engine: Engine) -> PositionsResponse:
 
 
 def blotter_view(engine: Engine) -> list[BlotterRow]:
+    from app.services.decision_store import get_decision, list_decisions
+
+    decision_by_order = {str(d["paper_order_id"]): d for d in list_decisions(engine, limit=500) if d.get("paper_order_id")}
     intents = _latest_events_by_type(engine, "OrderIntentCreated", limit=500)
     broker_events = _latest_events_by_type(engine, "BrokerOrderEvent", limit=1000)
     fills = _latest_events_by_type(engine, "FillEvent", limit=1000)
@@ -820,10 +988,15 @@ def blotter_view(engine: Engine) -> list[BlotterRow]:
         fill_rows = fills_by_intent.get(intent_id, [])
         statuses = [str(x.get("status", "")) for x in broker_rows if x.get("status")]
         broker_order_ids = list({str(x.get("broker_order_id")) for x in broker_rows if x.get("broker_order_id")})
+        fill_price = float(fill_rows[0].get("price")) if fill_rows else None
+        dec = get_decision(engine, str(payload.get("decision_id"))) if payload.get("decision_id") else decision_by_order.get(intent_id)
         out.append(
             BlotterRow(
+                decision_id=str(payload.get("decision_id") or (dec.get("decision_id") if dec else None)) or None,
                 order_intent_id=intent_id,
                 ticker=str(payload.get("ticker", "UNKNOWN")).upper(),
+                strategy_type=payload.get("structure_label") or (dec.get("strategy_type") if dec else None),
+                direction=str(dec.get("direction")) if dec else None,
                 structure_label=payload.get("structure_label"),
                 legs_summary=[str(leg) for leg in payload.get("legs_summary", [])] if isinstance(payload.get("legs_summary"), list) else [],
                 created_ts=row["occurred_at"],
@@ -833,8 +1006,10 @@ def blotter_view(engine: Engine) -> list[BlotterRow]:
                 status=statuses[0] if statuses else "CREATED",
                 status_timeline=statuses or ["CREATED"],
                 fills=fill_rows,
+                fill_price=fill_price,
                 fees_usd=float(payload.get("fees_usd", 0.0)),
                 slippage_vs_expected_usd=float(payload.get("slippage_vs_expected_usd", 0.0)),
+                review_status=str(dec.get("review_status", "pending")) if dec else "pending",
                 broker_reject_reason=next(
                     (str(x.get("reason")) for x in broker_rows if str(x.get("status", "")).upper() == "REJECTED"),
                     None,
@@ -914,7 +1089,66 @@ def strategy_health_view(engine: Engine) -> list[StrategyHealthRow]:
 
 
 def trade_review_queue_view(engine: Engine, limit: int = 100) -> list[TradeReviewItem]:
+    from app.services.decision_store import list_decisions
+
     out: list[TradeReviewItem] = []
+    for dec in list_decisions(engine, limit=limit):
+        status = str(dec.get("review_status", "pending"))
+        current = str(dec.get("current_status", ""))
+        if status not in {"ready_for_review", "reviewed"} and current != "position_closed":
+            if not (dec.get("paper_pnl") is not None and status == "pending"):
+                continue
+        if dec.get("paper_pnl") is None and status != "reviewed":
+            continue
+        created = dec.get("created_at")
+        closed = dec.get("closed_at")
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if isinstance(closed, str):
+            closed = datetime.fromisoformat(closed.replace("Z", "+00:00"))
+        time_in_trade = None
+        if isinstance(created, datetime) and isinstance(closed, datetime):
+            time_in_trade = f"{int((closed - created).total_seconds() // 3600)}h"
+        extra = dec.get("extra") or {}
+        out.append(
+            TradeReviewItem(
+                decision_id=str(dec["decision_id"]),
+                symbol=str(dec["symbol"]),
+                strategy_type=str(dec.get("strategy_type", "unknown")),
+                direction=str(dec.get("direction", "bullish")),
+                created_at=created if isinstance(created, datetime) else datetime.now(UTC),
+                closed_at=closed if isinstance(closed, datetime) else None,
+                original_score=float(dec.get("score", 0.0)),
+                risk_status=str(dec.get("risk_status", "unknown")),
+                max_loss=dec.get("max_loss"),
+                max_profit=dec.get("max_profit"),
+                final_pnl=dec.get("paper_pnl"),
+                final_pnl_percent=dec.get("paper_pnl_percent"),
+                max_drawdown=dec.get("max_drawdown"),
+                time_in_trade=time_in_trade,
+                outcome=dec.get("final_outcome"),
+                lesson=dec.get("lesson"),
+                review_status=status,
+                thesis=dec.get("thesis"),
+                entry_trigger=dec.get("entry_trigger"),
+                invalidation_rule=dec.get("invalidation_rule"),
+                profit_plan=dec.get("profit_plan"),
+                rule_reasons=list(dec.get("rule_reasons") or []),
+                market_regime=dec.get("market_regime"),
+                technical_score=dec.get("technical_score"),
+                catalyst_score=dec.get("catalyst_score"),
+                liquidity_score=dec.get("liquidity_score"),
+                entry_price=extra.get("entry_price"),
+                exit_price=extra.get("exit_price"),
+                entry_trigger_met=extra.get("entry_trigger_met"),
+                invalidation_hit=extra.get("invalidation_hit"),
+                profit_target_hit=extra.get("profit_target_hit"),
+                exit_followed_plan=extra.get("exit_followed_plan"),
+            )
+        )
+    if out:
+        return out[:limit]
+
     with engine.begin() as conn:
         # Human overrides are always review-worthy.
         approval_stmt = _latest_event_select("ApprovalDecision").limit(limit)
@@ -924,11 +1158,17 @@ def trade_review_queue_view(engine: Engine, limit: int = 100) -> list[TradeRevie
             if flags:
                 out.append(
                     TradeReviewItem(
+                        decision_id=f"legacy_{row['aggregate_id']}",
+                        symbol=str(payload.get("ticker", "UNKNOWN")),
+                        strategy_type="override",
+                        direction="bullish",
+                        created_at=row["occurred_at"],
                         occurred_at=row["occurred_at"],
                         issue_type="override",
                         severity="high",
                         aggregate_id=row["aggregate_id"],
                         message=f"Override flags: {', '.join(flags)}",
+                        review_status="ready_for_review",
                     )
                 )
 
@@ -940,11 +1180,17 @@ def trade_review_queue_view(engine: Engine, limit: int = 100) -> list[TradeRevie
             if quote_type in {"delayed", "snapshot"}:
                 out.append(
                     TradeReviewItem(
+                        decision_id=f"legacy_{row['aggregate_id']}",
+                        symbol=str(payload.get("ticker", "UNKNOWN")),
+                        strategy_type=str(payload.get("strategy_sleeve", "signal")),
+                        direction=str(payload.get("side", "bullish")),
+                        created_at=row["occurred_at"],
                         occurred_at=row["occurred_at"],
                         issue_type="data_quality",
                         severity="medium",
                         aggregate_id=row["aggregate_id"],
                         message=f"Signal used {quote_type} quotes.",
+                        review_status="ready_for_review",
                     )
                 )
 
@@ -957,15 +1203,21 @@ def trade_review_queue_view(engine: Engine, limit: int = 100) -> list[TradeRevie
             if status == "approved" and edge <= 0:
                 out.append(
                     TradeReviewItem(
+                        decision_id=f"legacy_{row['aggregate_id']}",
+                        symbol=str(payload.get("ticker", "UNKNOWN")),
+                        strategy_type="risk",
+                        direction="bullish",
+                        created_at=row["occurred_at"],
                         occurred_at=row["occurred_at"],
                         issue_type="negative_edge",
                         severity="high",
                         aggregate_id=row["aggregate_id"],
                         message=f"Approved with non-positive edge after costs ({edge:.2f}).",
+                        review_status="ready_for_review",
                     )
                 )
 
-    out.sort(key=lambda x: x.occurred_at, reverse=True)
+    out.sort(key=lambda x: x.created_at, reverse=True)
     return out[:limit]
 
 

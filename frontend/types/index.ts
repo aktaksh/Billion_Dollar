@@ -38,8 +38,24 @@ export type ExplainFeedItem = {
   ts: string;
   ticker?: string | null;
   severity: "info" | "warn" | "block";
-  category: "data" | "news" | "signal" | "structure" | "risk" | "approval" | "execution" | "reconcile" | "system";
+  category:
+    | "data"
+    | "news"
+    | "signal"
+    | "structure"
+    | "risk"
+    | "approval"
+    | "execution"
+    | "reconcile"
+    | "broker"
+    | "paper"
+    | "review"
+    | "system";
   step: string;
+  human_message?: string;
+  event_type?: string;
+  scope?: "global" | "ticker" | "decision" | "risk" | "broker" | "paper" | "review";
+  linked_decision_id?: string | null;
   refs: Record<string, unknown>;
 };
 
@@ -56,11 +72,43 @@ export type StrategyHealthRow = {
 };
 
 export type TradeReviewItem = {
-  occurred_at: string;
-  issue_type: string;
-  severity: "low" | "medium" | "high";
-  aggregate_id: string;
-  message: string;
+  decision_id: string;
+  symbol: string;
+  strategy_type: string;
+  direction: string;
+  created_at: string;
+  closed_at?: string | null;
+  original_score?: number;
+  risk_status?: string;
+  max_loss?: number | null;
+  max_profit?: number | null;
+  final_pnl?: number | null;
+  final_pnl_percent?: number | null;
+  max_drawdown?: number | null;
+  time_in_trade?: string | null;
+  outcome?: string | null;
+  lesson?: string | null;
+  review_status?: string;
+  thesis?: string | null;
+  entry_trigger?: string | null;
+  invalidation_rule?: string | null;
+  profit_plan?: string | null;
+  rule_reasons?: Array<Record<string, unknown>>;
+  market_regime?: string | null;
+  technical_score?: number | null;
+  catalyst_score?: number | null;
+  liquidity_score?: number | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  entry_trigger_met?: boolean | null;
+  invalidation_hit?: boolean | null;
+  profit_target_hit?: boolean | null;
+  exit_followed_plan?: boolean | null;
+  occurred_at?: string;
+  issue_type?: string;
+  severity?: "low" | "medium" | "high";
+  aggregate_id?: string;
+  message?: string;
 };
 
 export type UniverseValidationResult = {
@@ -133,16 +181,44 @@ export type WatchlistOpportunity = {
   earnings_date?: string | null;
   earnings_certainty: "high" | "medium" | "low" | "unknown";
   last_snapshot_ts?: string | null;
-  next_action: "view_trade_card" | "build_structure" | "run_risk" | "request_approval" | "manage_position" | "blocked";
+  suggested_strategy?: string | null;
+  max_loss?: number | null;
+  pop?: number | null;
+  liquidity?: string;
+  review_status?: string;
+  decision_id?: string | null;
+  decision_status?: string | null;
+  signal_id?: string | null;
+  next_action:
+    | "view_trade_card"
+    | "save_decision"
+    | "run_replay"
+    | "run_paper"
+    | "reject"
+    | "build_structure"
+    | "run_risk"
+    | "request_approval"
+    | "manage_position"
+    | "blocked";
 };
 
 export type TradeCard = {
   ticker: string;
   state: WatchlistOpportunity["state"];
+  direction?: string | null;
+  strategy_type?: string | null;
+  risk_status?: string | null;
+  data_status?: DataStatus;
+  broker_status?: string;
+  reconcile_status?: string;
+  decision_id?: string | null;
   last_price?: number | null;
   snapshot_timestamps: Record<string, string>;
   thesis: Record<string, unknown>;
   why_now_deltas: string[];
+  decision_summary?: Record<string, unknown>;
+  trade_plan?: Record<string, unknown>;
+  strategy_legs?: Array<Record<string, unknown>>;
   confidence_total: number;
   confidence_components: Record<string, number>;
   warnings: string[];
@@ -154,15 +230,24 @@ export type TradeCard = {
 };
 
 export type PositionRow = {
+  decision_id?: string | null;
   ticker: string;
   strategy_label?: string | null;
+  direction?: string | null;
   qty: number;
   avg_price?: number | null;
+  current_price?: number | null;
   last_price?: number | null;
   pnl_daily: number;
   pnl_total: number;
+  pnl_percent?: number;
+  max_drawdown?: number;
   dte?: number | null;
   breakeven?: number | null;
+  entry_trigger?: string | null;
+  invalidation_rule?: string | null;
+  profit_plan?: string | null;
+  current_action?: "hold" | "take_partial_profit" | "close" | "watch_invalidation" | "review_required";
   alerts: string[];
 };
 
@@ -172,8 +257,11 @@ export type PositionsResponse = {
 };
 
 export type BlotterRow = {
+  decision_id?: string | null;
   order_intent_id: string;
   ticker: string;
+  strategy_type?: string | null;
+  direction?: string | null;
   structure_label?: string | null;
   legs_summary: string[];
   created_ts: string;
@@ -183,8 +271,10 @@ export type BlotterRow = {
   status: string;
   status_timeline: string[];
   fills: Array<Record<string, unknown>>;
+  fill_price?: number | null;
   fees_usd: number;
   slippage_vs_expected_usd: number;
+  review_status?: string;
   broker_reject_reason?: string | null;
 };
 
@@ -198,4 +288,268 @@ export type ReconcileMismatch = {
   last_broker_truth_ts?: string | null;
 };
 
+export type StrategyOptionLegIn = {
+  expiry: string;
+  dte: number;
+  option_type: "call" | "put";
+  strike: number;
+  bid: number;
+  ask: number;
+  volume?: number;
+  open_interest?: number;
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
+  iv?: number;
+};
+
+export type StrategyRuleReason = {
+  rule_id: string;
+  message: string;
+  severity: string;
+};
+
+export type StrategyCandidateOut = {
+  symbol: string;
+  strategy_type: string;
+  direction: "bullish" | "bearish";
+  expiry: string;
+  dte: number;
+  legs: Array<{ action: string; option_type: string; strike: number; qty: number }>;
+  debit_or_credit: number;
+  max_profit: number;
+  max_loss: number;
+  breakeven: number;
+  probability_profit: number;
+  expected_value: number;
+  alpha_score: number;
+  beta_score: number;
+  gamma_score: number;
+  liquidity_score: number;
+  strategy_score: number;
+  risk_status: "allow" | "reject" | "override_required";
+  rule_reasons: StrategyRuleReason[];
+};
+
+export type StrategyBuilderCandidatesIn = {
+  symbol: string;
+  direction: "bullish" | "bearish";
+  last_price: number;
+  feature?: Record<string, number>;
+  option_chain: StrategyOptionLegIn[];
+  reconciliation_mismatch_active?: boolean;
+  thresholds?: Record<string, number>;
+};
+
+export type DataStatus = "live" | "stale" | "mock" | "degraded" | "disconnected";
+export type ExecutionMode = "paper_only" | "read_only" | "manual_approval" | "close_only" | "halted";
+
+export type BrokerStatus = {
+  as_of: string;
+  tws_reachable: boolean;
+  broker_connected: boolean;
+  broker_authenticated: boolean;
+  data_status: DataStatus;
+  tws_host: string;
+  tws_port: number;
+  tws_client_id: number;
+  tws_read_only: boolean;
+  connection_worker_status: string;
+  message: string;
+  next_action: string;
+};
+
+export type BrokerConnectResult = {
+  as_of: string;
+  status: "connected" | "tws_unreachable" | "error";
+  message: string;
+  next_action: string;
+  data_status: DataStatus;
+  ingestion_processed: number;
+  steps: string[];
+};
+
+export type ShellStatus = {
+  as_of: string;
+  broker_connected: boolean;
+  broker_authenticated: boolean;
+  data_status: DataStatus;
+  execution_mode: ExecutionMode;
+  trading_mode: RiskStatus["trading_mode"];
+  reconcile_worker_status: string;
+  reconcile_blocking_count: number;
+  can_open_new_entries: boolean;
+  active_halts: string[];
+  runtime_block_reason?: string | null;
+};
+
+export type StrategyBuilderCandidatesOut = {
+  symbol: string;
+  direction: "bullish" | "bearish";
+  candidates: StrategyCandidateOut[];
+  as_of: string;
+  data_status: DataStatus;
+};
+
+export type StrategyRuntimeOut = {
+  ticker: string;
+  direction: "bullish" | "bearish";
+  feature_snapshot_ref: string;
+  option_chain_snapshot_ref: string;
+  candidates: StrategyCandidateOut[];
+  as_of: string;
+  data_status: DataStatus;
+  runtime_allowed: boolean;
+  runtime_block_reason?: string | null;
+};
+
+export type ReplayCandidateResult = {
+  strategy_type: string;
+  risk_status: string;
+  strategy_score: number;
+  probability_profit: number;
+  expected_value: number;
+  replay_avg_pnl: number;
+  scenario_pnls: number[];
+};
+
+export type ReplayRunOut = {
+  ticker: string;
+  direction: "bullish" | "bearish";
+  scenarios: number[];
+  results: ReplayCandidateResult[];
+  as_of: string;
+  data_status: DataStatus;
+};
+
+export type PaperTradeRunOut = {
+  mode?: "decision" | "quick";
+  decision_id?: string | null;
+  ticker: string;
+  direction: "bullish" | "bearish";
+  signal_id: string;
+  order_intent_id: string;
+  position_event_id: string;
+  close_event_id: string;
+  entry_price: number;
+  exit_price: number;
+  realized_pnl_after_costs_usd: number;
+  realized_pnl_percent?: number;
+  max_drawdown?: number;
+  fees_usd: number;
+  slippage_usd: number;
+  lifecycle?: string[];
+  as_of: string;
+  data_status: DataStatus;
+};
+
+export type DecisionCurrentStatus =
+  | "candidate_generated"
+  | "decision_saved"
+  | "replayed"
+  | "paper_order_created"
+  | "paper_filled"
+  | "position_open"
+  | "position_closed"
+  | "skipped"
+  | "rejected";
+
+export type DecisionReviewStatus = "pending" | "ready_for_review" | "reviewed";
+
+export type DecisionFinalOutcome =
+  | "correct"
+  | "partially_correct"
+  | "wrong"
+  | "invalid_entry"
+  | "invalid_exit"
+  | "skipped_trigger_not_met"
+  | "not_reviewed";
+
+export type TradeDecision = {
+  decision_id: string;
+  created_at: string;
+  updated_at: string;
+  symbol: string;
+  universe?: string | null;
+  signal_id?: string | null;
+  direction: string;
+  strategy_type: string;
+  risk_status: string;
+  confidence: number;
+  score: number;
+  edge: number;
+  market_regime?: string | null;
+  technical_score?: number | null;
+  catalyst_score?: number | null;
+  liquidity_score?: number | null;
+  risk_score?: number | null;
+  max_loss?: number | null;
+  max_profit?: number | null;
+  breakeven?: number | null;
+  probability_profit?: number | null;
+  expected_value?: number | null;
+  entry_trigger?: string | null;
+  invalidation_rule?: string | null;
+  profit_plan?: string | null;
+  thesis?: string | null;
+  rule_reasons: Array<Record<string, unknown>>;
+  legs: Array<Record<string, unknown>>;
+  data_status: DataStatus;
+  broker_status: string;
+  reconciliation_status: string;
+  paper_order_id?: string | null;
+  paper_position_id?: string | null;
+  paper_pnl?: number | null;
+  paper_pnl_percent?: number | null;
+  max_drawdown?: number | null;
+  current_status: DecisionCurrentStatus;
+  review_status: DecisionReviewStatus;
+  final_outcome?: DecisionFinalOutcome | null;
+  lesson?: string | null;
+  closed_at?: string | null;
+  replay_avg_pnl?: number | null;
+};
+
+export type DashboardDecisionQuality = {
+  total_decisions_today: number;
+  paper_trades_opened: number;
+  open_paper_positions: number;
+  decisions_ready_for_review: number;
+  reviewed_decisions: number;
+  win_rate: number;
+  avg_paper_pnl_percent: number;
+  avg_max_drawdown: number;
+  best_strategy: string;
+  worst_strategy: string;
+  most_common_reject_reason: string;
+  engine_accuracy: number;
+};
+
+export type DashboardSummary = {
+  as_of: string;
+  decision_quality: DashboardDecisionQuality;
+  shell?: ShellStatus | null;
+};
+
+export type EnrichedRecommendation = {
+  signal_id: string;
+  ticker: string;
+  strategy: string;
+  direction: string;
+  confidence: number;
+  edge: number;
+  max_loss?: number | null;
+  max_profit?: number | null;
+  pop?: number | null;
+  risk_status: string;
+  decision_status: string;
+  decision_id?: string | null;
+  regime_label: string;
+  thesis: string;
+  entry_trigger: string;
+  invalidation_rule: string;
+  liquidity_status: string;
+  reason_preview: string[];
+};
 

@@ -1,14 +1,22 @@
 import type {
   ActiveUniverse,
   BlotterRow,
+  DashboardSummary,
+  EnrichedRecommendation,
   ExplainFeedItem,
   EventSummary,
   PositionsResponse,
   ReconcileMismatch,
   Recommendation,
+  ReplayRunOut,
   RiskStatus,
+  StrategyBuilderCandidatesIn,
+  StrategyBuilderCandidatesOut,
+  StrategyRuntimeOut,
+  PaperTradeRunOut,
   StrategyHealthRow,
   TradeCard,
+  TradeDecision,
   TradeReviewItem,
   UniverseUploadResponse,
   UniverseVersionRow,
@@ -45,12 +53,21 @@ export function getEvents() {
   return fetchJson<EventSummary[]>("/api/events");
 }
 
-export function getExplainFeed(params?: { ticker?: string; limit?: number; correlation_id?: string; minutes?: number }) {
+export function getExplainFeed(params?: {
+  ticker?: string;
+  limit?: number;
+  correlation_id?: string;
+  minutes?: number;
+  scope?: string;
+  decision_id?: string;
+}) {
   const query = new URLSearchParams();
   if (params?.ticker) query.set("ticker", params.ticker);
   if (params?.limit) query.set("limit", String(params.limit));
   if (params?.correlation_id) query.set("correlation_id", params.correlation_id);
   if (params?.minutes) query.set("minutes", String(params.minutes));
+  if (params?.scope) query.set("scope", params.scope);
+  if (params?.decision_id) query.set("decision_id", params.decision_id);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return fetchJson<ExplainFeedItem[]>(`/api/explain-feed${suffix}`);
 }
@@ -109,6 +126,130 @@ export function getBlotter() {
 
 export function getReconcileMismatches() {
   return fetchJson<ReconcileMismatch[]>("/api/reconcile/mismatches");
+}
+
+export function getShellStatus() {
+  return fetchJson<import("@/types").ShellStatus>("/api/ops/shell-status");
+}
+
+export function getBrokerStatus() {
+  return fetchJson<import("@/types").BrokerStatus>("/api/ops/broker/status");
+}
+
+export function connectBroker(refreshIngestion = true) {
+  return fetchJsonWithInit<import("@/types").BrokerConnectResult>(
+    `/api/ops/broker/connect?refresh_ingestion=${refreshIngestion ? "true" : "false"}`,
+    { method: "POST" },
+  );
+}
+
+export function runIngestionOnce(payload: { tickers: string[]; include_news?: boolean }) {
+  return fetchJsonWithInit<{ run_id: string; processed: number; as_of: string; data_status: string }>(
+    "/api/ops/ingestion/run-once",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getStrategyBuilderCandidates(payload: StrategyBuilderCandidatesIn) {
+  return fetchJsonWithInit<StrategyBuilderCandidatesOut>("/api/strategy-builder/candidates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runStrategyRuntime(payload: {
+  ticker: string;
+  direction: "bullish" | "bearish";
+  reconciliation_mismatch_active?: boolean;
+  thresholds?: Record<string, number>;
+}) {
+  return fetchJsonWithInit<StrategyRuntimeOut>("/api/strategy-builder/runtime", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runReplay(payload: { ticker: string; direction: "bullish" | "bearish"; scenarios?: number[] }) {
+  return fetchJsonWithInit<ReplayRunOut>("/api/replay/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runPaperTrade(payload: {
+  mode?: "decision" | "quick";
+  decision_id?: string;
+  ticker?: string;
+  direction?: "bullish" | "bearish";
+  scenario_return?: number;
+}) {
+  return fetchJsonWithInit<PaperTradeRunOut>("/api/paper/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "decision", scenario_return: 0.015, ...payload }),
+  });
+}
+
+export function getDashboardSummary() {
+  return fetchJson<DashboardSummary>("/api/dashboard/summary");
+}
+
+export function getDashboardRecommendations() {
+  return fetchJson<EnrichedRecommendation[]>("/api/dashboard/recommendations");
+}
+
+export function saveDecision(payload: Record<string, unknown>) {
+  return fetchJsonWithInit<TradeDecision>("/api/decisions/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getDecisions(params?: { symbol?: string; review_status?: string }) {
+  const q = new URLSearchParams();
+  if (params?.symbol) q.set("symbol", params.symbol);
+  if (params?.review_status) q.set("review_status", params.review_status);
+  const suffix = q.toString() ? `?${q.toString()}` : "";
+  return fetchJson<TradeDecision[]>(`/api/decisions${suffix}`);
+}
+
+export function getDecision(decisionId: string) {
+  return fetchJson<TradeDecision>(`/api/decisions/${encodeURIComponent(decisionId)}`);
+}
+
+export function patchDecision(decisionId: string, payload: Record<string, unknown>) {
+  return fetchJsonWithInit<TradeDecision>(`/api/decisions/${encodeURIComponent(decisionId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getTradeReview() {
+  return fetchJson<TradeReviewItem[]>("/api/trade-review");
+}
+
+export function classifyReview(decisionId: string) {
+  return fetchJsonWithInit<{ decision_id: string; final_outcome: string; review_status: string }>(
+    `/api/trade-review/${encodeURIComponent(decisionId)}/classify`,
+    { method: "POST" },
+  );
+}
+
+export function completeReview(decisionId: string, payload: { final_outcome: string; lesson: string }) {
+  return fetchJsonWithInit<TradeDecision>(`/api/trade-review/${encodeURIComponent(decisionId)}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 

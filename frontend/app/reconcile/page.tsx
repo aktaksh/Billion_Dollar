@@ -32,7 +32,7 @@ export default async function ReconcilePage() {
           <tbody>
             {mismatches.length === 0 ? (
               <tr>
-                <td colSpan={6}>No mismatches detected.</td>
+                <td colSpan={6}>No mismatches detected. App state matches TWS broker state.</td>
               </tr>
             ) : (
               mismatches.map((row) => (

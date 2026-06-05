@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 type ThemePreference = "dark" | "light" | "system";
 type EffectiveTheme = "dark" | "light";
@@ -12,7 +12,8 @@ type ThemeContextValue = {
   toggleTheme: () => void;
 };
 
-const THEME_STORAGE_KEY = "stock_tiger_theme";
+const THEME_STORAGE_KEY = "billion_dollar_theme";
+const LEGACY_THEME_STORAGE_KEY = "stock_tiger_theme";
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
@@ -33,7 +34,15 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [effectiveTheme, setEffectiveTheme] = useState<EffectiveTheme>("dark");
 
   useEffect(() => {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    let stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (!stored) {
+      const legacy = localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
+      if (legacy) {
+        localStorage.setItem(THEME_STORAGE_KEY, legacy);
+        localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
+        stored = legacy;
+      }
+    }
     const pref: ThemePreference = stored === "dark" || stored === "light" || stored === "system" ? stored : "system";
     const resolved = pref === "system" ? systemTheme() : pref;
     setPreferenceState(pref);
@@ -53,18 +62,18 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     return () => media.removeEventListener("change", onChange);
   }, [preference]);
 
-  const setPreference = (theme: ThemePreference) => {
+  const setPreference = useCallback((theme: ThemePreference) => {
     const next = theme === "system" ? systemTheme() : theme;
     setPreferenceState(theme);
     setEffectiveTheme(next);
     localStorage.setItem(THEME_STORAGE_KEY, theme);
     applyTheme(next);
-  };
+  }, []);
 
-  const toggleTheme = () => {
+  const toggleTheme = useCallback(() => {
     const next = effectiveTheme === "dark" ? "light" : "dark";
     setPreference(next);
-  };
+  }, [effectiveTheme, setPreference]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({
@@ -73,7 +82,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       setPreference,
       toggleTheme,
     }),
-    [preference, effectiveTheme],
+    [preference, effectiveTheme, setPreference, toggleTheme],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
