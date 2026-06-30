@@ -63,7 +63,7 @@ class ContractInvariantTests(unittest.TestCase):
         )
         self.assertTrue(rows)
         for row in rows:
-            self.assertIn(row["risk_status"], {"allow", "reject", "override_required"})
+            self.assertIn(row["risk_status"], {"allow", "reject", "override_required", "watch_only"})
             self.assertIsInstance(row["rule_reasons"], list)
 
     def test_builder_out_contract_fields(self):

@@ -72,7 +72,8 @@ export default function GlobalStatus() {
           Entries: {status.can_open_new_entries ? "allowed" : "blocked"}
         </span>
       </div>
-      {status.runtime_block_reason ? (
+      {status.runtime_block_reason &&
+      !(status.broker_connected && status.runtime_block_reason === "broker_disconnected") ? (
         <div className="banner banner-warning">{status.runtime_block_reason.replaceAll("_", " ")}</div>
       ) : null}
       {status.active_halts.length ? (

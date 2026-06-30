@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { runPaperTrade, runReplay, runStrategyRuntime, saveDecision } from "@/lib/api";
-import type { PaperTradeRunOut, ReplayRunOut, StrategyCandidateOut, StrategyRuntimeOut, TradeDecision } from "@/types";
+import { getDevFlags, getRuntimeMode, runPaperTrade, runReplay, runStrategyRuntime, saveDecision } from "@/lib/api";
+import type { PaperTradeRunOut, ReplayRunOut, RuntimeModeOut, StrategyCandidateOut, StrategyRuntimeOut, TradeDecision } from "@/types";
 
 function renderLegs(candidate: StrategyCandidateOut) {
   return candidate.legs.map((leg) => `${leg.action} ${leg.option_type.toUpperCase()} ${leg.strike}`).join(" | ");
@@ -12,7 +12,56 @@ function renderLegs(candidate: StrategyCandidateOut) {
 function riskClass(status: StrategyCandidateOut["risk_status"]) {
   if (status === "allow") return "sb-status sb-status-allow";
   if (status === "override_required") return "sb-status sb-status-override";
+  if (status === "watch_only") return "sb-status sb-status-watch";
   return "sb-status sb-status-reject";
+}
+
+function isActionableCandidate(status: StrategyCandidateOut["risk_status"]) {
+  return status === "allow" || status === "override_required";
+}
+
+function strikeDistancePct(strike: number, underlying: number | undefined) {
+  if (!underlying || underlying <= 0) return null;
+  return ((strike - underlying) / underlying) * 100;
+}
+
+function spreadWidth(candidate: StrategyCandidateOut) {
+  const buy = candidate.legs.find((leg) => leg.action === "BUY");
+  const sell = candidate.legs.find((leg) => leg.action === "SELL");
+  if (!buy || !sell) return null;
+  return Math.abs(Number(sell.strike) - Number(buy.strike));
+}
+
+function runtimeBlockMessage(reason: string | null | undefined): string {
+  if (!reason) return "Runtime blocked — new entries disabled";
+  if (reason === "option_chain_quality_failed_mock_data") {
+    return "Blocked: cached mock option chain. Connect broker, refresh QQQ Options Chain, then rerun.";
+  }
+  if (reason === "option_chain_quality_failed_far_strikes") {
+    return "Blocked: option strikes are far from current underlying";
+  }
+  if (reason === "option_chain_quality_failed_stale") {
+    return "Blocked: scanner snapshot is stale";
+  }
+  if (reason === "option_chain_quality_failed_non_broker") {
+    return "Blocked: option chain is not broker-backed";
+  }
+  if (reason === "option_chain_quality_failed_scanner_status") {
+    return "Blocked: scanner data is not fresh or partially usable";
+  }
+  if (reason === "option_chain_quality_failed_no_quotes") {
+    return "Blocked: no usable bid/ask quotes in option chain";
+  }
+  if (reason === "option_chain_quality_failed_no_underlying") {
+    return "Blocked: underlying price is missing";
+  }
+  if (reason === "option_chain_quality_failed_seeded_fixture_in_production") {
+    return "Blocked: testing fixture loaded in production mode — switch to Production in Settings and refresh QQQ chain";
+  }
+  if (reason === "option_chain_quality_failed_malformed") {
+    return "Blocked: option chain data is malformed";
+  }
+  return reason.replaceAll("_", " ");
 }
 
 export default function StrategyBuilderPage() {
@@ -35,9 +84,25 @@ export default function StrategyBuilderPage() {
   const [saveLoading, setSaveLoading] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideNote, setOverrideNote] = useState("");
+  const [showRejected, setShowRejected] = useState(false);
+  const [devStaleRuntimeMode, setDevStaleRuntimeMode] = useState(false);
+  const [runtimeMode, setRuntimeModeState] = useState<RuntimeModeOut | null>(null);
+
+  useEffect(() => {
+    void getRuntimeMode("QQQ")
+      .then((mode) => {
+        setRuntimeModeState(mode);
+        setDevStaleRuntimeMode(Boolean(mode.allow_stale_runtime_dev));
+      })
+      .catch(() => {
+        void getDevFlags()
+          .then((flags) => setDevStaleRuntimeMode(Boolean(flags.allow_stale_runtime_dev)))
+          .catch(() => setDevStaleRuntimeMode(false));
+      });
+  }, []);
 
   const openCandidate = (candidate: StrategyCandidateOut) => {
-    if (candidate.risk_status === "reject") return;
+    if (!isActionableCandidate(candidate.risk_status)) return;
     setSelectedCandidate(candidate);
     setDrawerOpen(true);
   };
@@ -45,11 +110,37 @@ export default function StrategyBuilderPage() {
   const entriesBlocked = reconciliationMismatchActive || result?.runtime_allowed === false;
 
   const topCandidate = useMemo(
-    () => result?.candidates.find((candidate) => candidate.risk_status === "allow") ?? result?.candidates[0] ?? null,
+    () =>
+      result?.top_recommendations?.[0]
+      ?? result?.allowed_candidates?.[0]
+      ?? result?.candidates.find((candidate) => candidate.risk_status === "allow")
+      ?? null,
     [result],
   );
-  const topThree = useMemo(() => (result?.candidates ?? []).slice(0, 3), [result]);
+  const topThree = useMemo(
+    () => (result?.runtime_allowed === false ? [] : (result?.top_recommendations ?? [])),
+    [result],
+  );
+  const watchOnlyCandidates = useMemo(
+    () => (result?.runtime_allowed === false ? [] : (result?.watch_only_candidates ?? [])),
+    [result],
+  );
+  const visibleCandidates = useMemo(() => {
+    if (!result) return [];
+    const primary = [
+      ...(result.allowed_candidates ?? []),
+      ...(result.override_required_candidates ?? []),
+      ...(result.watch_only_candidates ?? []),
+    ];
+    if (primary.length) {
+      return showRejected ? [...primary, ...(result.rejected_candidates ?? [])] : primary;
+    }
+    const fallback = result.candidates.filter((candidate) => candidate.risk_status !== "reject");
+    return showRejected ? result.candidates : fallback;
+  }, [result, showRejected]);
   const inferredRegime = useMemo(() => {
+    const regime = result?.setup_diagnostics?.regime;
+    if (typeof regime === "string" && regime.length) return regime;
     if (!result?.candidates.length) return "unknown";
     if (reconciliationMismatchActive) return "risk_off";
     const allowed = result.candidates.filter((c) => c.risk_status === "allow").length;
@@ -107,8 +198,8 @@ export default function StrategyBuilderPage() {
       setErrorMessage("Save a candidate decision before running paper trade");
       return;
     }
-    if (selectedCandidate?.risk_status === "reject") {
-      setErrorMessage("Rejected candidates cannot be paper traded");
+    if (selectedCandidate?.risk_status && !isActionableCandidate(selectedCandidate.risk_status)) {
+      setErrorMessage("Watch-only and rejected candidates cannot be paper traded");
       return;
     }
     setPaperLoading(true);
@@ -208,9 +299,74 @@ export default function StrategyBuilderPage() {
           </div>
         </form>
         {errorMessage ? <p className="danger-text">{errorMessage}</p> : null}
+        {runtimeMode?.runtime_mode === "testing" ? (
+          <div className="banner banner-warning">
+            Testing mode — recommendations may use fixture or stale cache, not live market data.
+          </div>
+        ) : null}
+        {devStaleRuntimeMode && runtimeMode?.runtime_mode !== "testing" ? (
+          <div className="banner banner-warning">
+            Dev mode: allow_stale_runtime_dev is enabled — stale broker cache may be used for Strategy Builder.
+          </div>
+        ) : null}
         {entriesBlocked ? (
           <div className="banner banner-danger">
-            {result?.runtime_block_reason?.replaceAll("_", " ") ?? "Reconcile halt active — new entries blocked"}
+            {reconciliationMismatchActive
+              ? "Reconcile halt active — new entries blocked"
+              : runtimeBlockMessage(result?.runtime_block_reason)}
+          </div>
+        ) : null}
+        {!entriesBlocked && result?.no_trade ? (
+          <div className="banner banner-warning">
+            NO_TRADE: setup and regime filters left no allowed debit spreads. Review watch-only candidates or wait for a confirmed setup.
+          </div>
+        ) : null}
+        {!entriesBlocked && result?.runtime_warning ? (
+          <div className="banner banner-warning">{result.runtime_warning}</div>
+        ) : null}
+        {!entriesBlocked && result?.chain_diagnostics?.scanner_status === "partial" ? (
+          <div className="banner banner-warning">
+            Partial: using broker data with limited usable contracts (
+            {String(result.chain_diagnostics.usable_contracts ?? 0)} usable)
+          </div>
+        ) : null}
+        {result?.chain_diagnostics ? (
+          <div className="sb-top-grid">
+            <div>
+              <div className="muted-text">Chain source</div>
+              <div className="mono">{String(result.chain_diagnostics.chain_source ?? "-")}</div>
+            </div>
+            <div>
+              <div className="muted-text">Data status</div>
+              <div className="mono">{String(result.chain_diagnostics.data_status ?? result.data_status ?? "-")}</div>
+            </div>
+            <div>
+              <div className="muted-text">Scanner status</div>
+              <div className="mono">{String(result.chain_diagnostics.scanner_status ?? "-")}</div>
+            </div>
+            <div>
+              <div className="muted-text">Underlying used</div>
+              <div className="mono">{Number(result.chain_diagnostics.underlying_price ?? 0).toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="muted-text">Snapshot age (s)</div>
+              <div className="mono">{String(result.chain_diagnostics.snapshot_age_seconds ?? "-")}</div>
+            </div>
+            <div>
+              <div className="muted-text">Nearest strike dist</div>
+              <div className="mono">
+                {result.chain_diagnostics.nearest_strike_distance_pct != null
+                  ? `${(Number(result.chain_diagnostics.nearest_strike_distance_pct) * 100).toFixed(1)}%`
+                  : "-"}
+              </div>
+            </div>
+            <div>
+              <div className="muted-text">Usable / rejected</div>
+              <div className="mono">
+                {String(result.chain_diagnostics.usable_contracts ?? 0)} /{" "}
+                {String(result.chain_diagnostics.rejected_contracts ?? 0)}
+              </div>
+            </div>
           </div>
         ) : null}
         {savedDecision ? (
@@ -240,6 +396,10 @@ export default function StrategyBuilderPage() {
             <div className="mono">{universeScope}</div>
           </div>
           <div>
+            <div className="muted-text">Setup status</div>
+            <div className="mono">{String(result?.setup_status ?? "-")}</div>
+          </div>
+          <div>
             <div className="muted-text">Regime</div>
             <div className="mono">{inferredRegime}</div>
           </div>
@@ -254,7 +414,35 @@ export default function StrategyBuilderPage() {
         </div>
       </section>
 
-      {topThree.length ? (
+      {watchOnlyCandidates.length && result?.runtime_allowed !== false ? (
+        <section className="card sb-cards">
+          <h3 className="panel-title">Watch Only</h3>
+          <p className="muted-text">Candidates downgraded by setup conflict, breakeven distance, or similar swing gates.</p>
+          <div className="sb-card-grid">
+            {watchOnlyCandidates.map((candidate) => (
+              <div
+                key={`watch-${candidate.strategy_type}-${candidate.expiry}-${renderLegs(candidate)}`}
+                className="sb-card"
+              >
+                <div className="sb-card-head">
+                  <span className="mono">{candidate.strategy_type}</span>
+                  <span className={riskClass(candidate.risk_status)}>{candidate.risk_status}</span>
+                </div>
+                <div className="muted-text">DTE {candidate.dte} / Exp {candidate.expiry}</div>
+                <div className="sb-card-metrics">
+                  <span className="mono">Score {candidate.strategy_score.toFixed(2)}</span>
+                  {candidate.breakeven_distance_pct != null ? (
+                    <span className="mono">BE dist {(candidate.breakeven_distance_pct * 100).toFixed(1)}%</span>
+                  ) : null}
+                </div>
+                <div className="muted-text">{renderLegs(candidate)}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {topThree.length && result?.runtime_allowed !== false ? (
         <section className="card sb-cards">
           <h3 className="panel-title">Top Recommendations</h3>
           <div className="sb-card-grid">
@@ -273,7 +461,7 @@ export default function StrategyBuilderPage() {
                 <div className="sb-card-metrics">
                   <span className="mono">Score {candidate.strategy_score.toFixed(2)}</span>
                   <span className={`mono ${candidate.expected_value >= 0 ? "success-text" : "danger-text"}`}>
-                    EV ${candidate.expected_value.toFixed(2)}
+                    Model EV ${candidate.expected_value.toFixed(2)}
                   </span>
                 </div>
                 <div className="muted-text">{renderLegs(candidate)}</div>
@@ -283,7 +471,7 @@ export default function StrategyBuilderPage() {
         </section>
       ) : null}
 
-      {topCandidate ? (
+      {topCandidate && result?.runtime_allowed !== false ? (
         <section className="card sb-top-pick">
           <h3 className="panel-title">Top Candidate</h3>
           <div className="sb-top-grid">
@@ -300,7 +488,7 @@ export default function StrategyBuilderPage() {
               <div className={riskClass(topCandidate.risk_status)}>{topCandidate.risk_status}</div>
             </div>
             <div>
-              <div className="muted-text">Expected Value</div>
+              <div className="muted-text">Model EV</div>
               <div className={`mono ${topCandidate.expected_value >= 0 ? "success-text" : "danger-text"}`}>
                 ${topCandidate.expected_value.toFixed(2)}
               </div>
@@ -345,11 +533,18 @@ export default function StrategyBuilderPage() {
       ) : null}
 
       <section className="card">
-        <h3 className="panel-title">Candidates</h3>
-        {!result?.candidates.length ? (
+        <div className="sb-card-head">
+          <h3 className="panel-title">Candidates</h3>
+          {result?.rejected_candidates?.length ? (
+            <button type="button" className="secondary-button" onClick={() => setShowRejected((value) => !value)}>
+              {showRejected ? "Hide rejected" : `Show rejected (${result.rejected_candidates.length})`}
+            </button>
+          ) : null}
+        </div>
+        {!visibleCandidates.length ? (
           <p className="muted-text">Run Runtime Flow to generate ranked candidates. Save a candidate before paper trading.</p>
         ) : null}
-        {result?.candidates.length ? (
+        {visibleCandidates.length ? (
           <div className="table-wrap">
             <table className="dense-table">
               <thead>
@@ -358,10 +553,13 @@ export default function StrategyBuilderPage() {
                   <th>Symbol</th>
                   <th>Direction</th>
                   <th>Strategy</th>
-                  <th>Max Loss</th>
+                  <th>DTE</th>
+                  <th>Debit</th>
+                  <th>Width</th>
+                  <th>Strike Dist</th>
                   <th>Max Profit</th>
-                  <th>POP</th>
-                  <th>EV</th>
+                  <th>Model POP</th>
+                  <th>Model EV</th>
                   <th>Confidence</th>
                   <th>Edge</th>
                   <th>Risk</th>
@@ -370,7 +568,7 @@ export default function StrategyBuilderPage() {
                 </tr>
               </thead>
               <tbody>
-                {result.candidates.map((candidate, idx) => (
+                {visibleCandidates.map((candidate, idx) => (
                   <tr
                     key={`${candidate.strategy_type}-${candidate.expiry}-${renderLegs(candidate)}`}
                     className={selectedCandidate === candidate ? "is-active" : ""}
@@ -383,6 +581,17 @@ export default function StrategyBuilderPage() {
                     <td className="mono">{candidate.symbol}</td>
                     <td>{candidate.direction}</td>
                     <td>{candidate.strategy_type}</td>
+                    <td className="mono">{candidate.dte}</td>
+                    <td className="mono">${candidate.debit_or_credit.toFixed(2)}</td>
+                    <td className="mono">{spreadWidth(candidate)?.toFixed(0) ?? "-"}</td>
+                    <td className="mono">
+                      {candidate.legs
+                        .map((leg) => {
+                          const dist = strikeDistancePct(Number(leg.strike), Number(result?.chain_diagnostics?.underlying_price));
+                          return dist == null ? "-" : `${dist.toFixed(1)}%`;
+                        })
+                        .join(" / ")}
+                    </td>
                     <td className="mono">${candidate.max_loss.toFixed(2)}</td>
                     <td className="mono">${candidate.max_profit.toFixed(2)}</td>
                     <td className="mono">{(candidate.probability_profit * 100).toFixed(1)}%</td>
@@ -406,7 +615,7 @@ export default function StrategyBuilderPage() {
                         <button
                           type="button"
                           className="ghost-button"
-                          disabled={saveLoading}
+                          disabled={saveLoading || !isActionableCandidate(candidate.risk_status)}
                           onClick={() => void saveSelectedDecision(candidate)}
                         >
                           Save
@@ -415,7 +624,7 @@ export default function StrategyBuilderPage() {
                         <button
                           type="button"
                           className="ghost-button"
-                          disabled={!savedDecision || candidate.risk_status === "reject"}
+                          disabled={!savedDecision || !isActionableCandidate(candidate.risk_status)}
                           onClick={runPaperNow}
                         >
                           Paper
@@ -464,7 +673,7 @@ export default function StrategyBuilderPage() {
                     <span className="mono">{selectedCandidate.breakeven.toFixed(2)}</span>
                   </li>
                   <li>
-                    <span>POP</span>
+                    <span>Model POP</span>
                     <span className="mono">{(selectedCandidate.probability_profit * 100).toFixed(1)}%</span>
                   </li>
                 </ul>

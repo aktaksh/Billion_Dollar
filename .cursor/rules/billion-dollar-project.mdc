@@ -1,0 +1,157 @@
+---
+description: Billion Dollar decision-review workstation — scope, lifecycle, key paths, constraints
+alwaysApply: true
+---
+
+# Billion Dollar — Project Agent Rules
+
+## Purpose
+
+Billion Dollar is an **options decision-review workstation** (FastAPI + Next.js). It helps review trade ideas, save decisions, run **simulated paper trades**, and judge outcomes over time.
+
+It is **not** a live auto-trading bot. `execution_mode` is `paper_only`; TWS is **read-only** in MVP.
+
+## Mandatory user workflow
+
+```text
+Read → Save Decision → Replay → Paper → Review → Learn
+```
+
+- Normal paper trades **require** a saved `decision_id`.
+- **Quick Paper Test** is the only exception (developer mode).
+- If risk says reject, do not paper trade.
+- If broker disconnected or reconcile blocking, pause new entries.
+
+## Repo map (start here)
+
+| Area | Path |
+|------|------|
+| API routes | `backend/app/main.py` |
+| Pydantic models | `backend/app/models.py` |
+| DB + `trade_decisions` | `backend/app/db.py` |
+| Event log views | `backend/app/services/event_store.py` |
+| Decision CRUD | `backend/app/services/decision_store.py`, `decisions_service.py` |
+| Paper + review | `backend/app/services/paper_decision_service.py`, `backend/app/engines/review_engine.py` |
+| TWS client | `backend/app/services/broker/tws_client.py` |
+| Options chain scanner | `backend/app/services/options_chain_scanner.py`, `options_chain_planner.py` |
+| Config | `backend/app/config.py`, `backend/config.yaml` |
+| Frontend API | `frontend/lib/api.ts` |
+| Decision helpers | `frontend/lib/decisionHelpers.ts` |
+| Run locally | `run_local.sh` (backend detached via nohup on port 8000) |
+
+## Docs hierarchy (do not duplicate)
+
+- **User guide:** `README.md`
+- **Architecture spec (canonical):** `Billion-Dollar-Architecture-Reference.md` — only architecture markdown; do not add parallel Architecture.md files
+- **Living flows for external review:** `PSEUDOCODE.md` — step-by-step runtime pseudocode for ChatGPT / human review
+
+## Mandatory documentation sync (every implementation task)
+
+**Do not mark a task complete until docs are updated when the change affects behavior, APIs, config, UI, or data flow.**
+
+Update **both** files when applicable — architecture for *what/why/structure*, pseudocode for *step-by-step flow*.
+
+### When to update `Billion-Dollar-Architecture-Reference.md`
+
+Update the relevant section(s) after changes to:
+
+| Change type | Typical sections |
+|-------------|------------------|
+| API routes / response models | §11 API Response Contract, §8.x service section |
+| Strategy Builder algorithm / UI | §8.5 Strategy Runtime Engine, §16 Strategy Builder Page |
+| Options chain scanner | §18 Options Chain Page, §18.1 QQQ Scanner Design |
+| Broker / TWS / data trust | §3 Broker Integration, §7 Data Trust Policy |
+| Risk / reconcile / paper / replay | §8.6–8.9, §19–25 |
+| Frontend pages / shell | §12–14 UI map, specific page section (§15–27) |
+| Config defaults (`config.yaml`) | §18.1 scanner params, §8.x affected service |
+| Event model / storage | §10 Event-Driven Storage Model |
+
+Rules:
+
+- Edit the **existing** section in place; do not create duplicate architecture files.
+- Keep architecture **descriptive** (components, contracts, policies) — not line-by-line algorithm (that belongs in PSEUDOCODE).
+- If a section is materially wrong after your change, fix it in the same PR/task.
+
+### When to update `PSEUDOCODE.md`
+
+Update after changes to:
+
+| Change type | Typical sections |
+|-------------|------------------|
+| Decision lifecycle / paper / review flow | §3 lifecycle hooks, §5 flows |
+| New/changed API routes | §5 API pseudocode blocks |
+| Strategy Builder (any part) | **§5c** (primary), §3 hook, §10 checklist item 9 |
+| Options chain scanner | §5b |
+| Broker connect / ingestion / TWS path | §6 |
+| Frontend page behavior | §7 page map + relevant flow |
+| Known gaps fixed or new gaps | §9 |
+| Review checklist | §10 |
+
+Rules:
+
+- **§5c** is the Strategy Builder source of truth for algorithm steps (gates, leg filter, spreads, dedupe, payoff, POP, partition, UI).
+- Do not leave §5c describing old behavior (e.g. `calls[:40]`, `max(0.01, debit)`, mock-allowed QQQ).
+- After major milestones, remind the user they can paste `PSEUDOCODE.md` into ChatGPT for review.
+
+### Documentation completion checklist (agent)
+
+Before reporting a task done, confirm:
+
+```text
+[ ] Code + tests pass (if applicable)
+[ ] Billion-Dollar-Architecture-Reference.md updated OR N/A (explain why N/A)
+[ ] PSEUDOCODE.md updated OR N/A (explain why N/A)
+[ ] No new duplicate architecture/pseudocode files created
+```
+
+**N/A is valid only for** pure refactors with zero behavior/API/UI/config change, or typo-only edits.
+
+### Quick mapping: Strategy Builder changes
+
+| Doc | Sections |
+|-----|----------|
+| Architecture | §8.5, §16, §11 (`StrategyRuntimeOut` fields) |
+| PSEUDOCODE | §3, §5c, §9, §10 item 9 |
+
+Code pointers: `option_chain_quality.py`, `option_leg_filter.py`, `strategy_runtime_engine.py`, `strategy_builder_engine.py`, `probability_engine.py`, `main.py`, `models.py`, `frontend/app/strategy-builder/page.tsx`.
+
+## Broker and data
+
+- TWS / IB Gateway via ib_insync; **no auto-connect on startup** — user must Connect Broker (Settings or `POST /api/ops/broker/connect`).
+- Ports: **7496/7497** (TWS live/paper), **4001/4002** (IB Gateway live/paper) — set `tws_port` in `backend/config.yaml`; restart backend after change.
+- `data_status: live` = active TWS session; **seeded** recommendations (`"Seeded candidate"`) are not live IBKR rankings.
+- Live signals: `POST /api/signals/generate-from-ibkr` (thesis contains `"Auto-generated from IBKR"`).
+- IBKR market calls are **sync and can block** the API worker; use `refresh_ingestion=false` on connect if slow.
+
+## QQQ options chain scanner
+
+- **QQQ only** for scanner MVP; **8 below + 12 above** listed $5 strikes × 4 expiries ≈ **160 contracts/cycle** (cap 200).
+- DTE **21**–42, max **4 expiries**, **8 strikes below + 12 above** spot on IBKR-listed **$5 multiples only**; batch one expiry at a time with **5s** delay.
+- `GET /api/options-chain/{symbol}` = cache only; `POST .../refresh` enqueues background scan (non-blocking).
+- Frontend `/options-chain` reads cached API only — never sync ingestion for QQQ.
+- Strategy runtime for scanner symbols reads SQLite cache, not live broker in request path.
+- Strategy Builder algorithm: `PSEUDOCODE.md` **§5c** (gates, leg filter, spreads, dedupe, partition); code in `option_chain_quality.py`, `option_leg_filter.py`, `strategy_builder_engine.py`, `main.py`.
+- Metadata via `reqSecDefOptParams` only; no full dense chain scan.
+
+## Decision hub
+
+`trade_decisions` links: recommendation → saved decision → paper → blotter → positions → review → dashboard metrics.
+
+Key APIs: `POST /api/decisions/save`, `GET /api/decisions`, `POST /api/paper/run`, `GET /api/dashboard/summary`, `GET /api/dashboard/recommendations`.
+
+## Coding constraints
+
+- Match existing FastAPI + Next.js patterns; **minimal diff**; no drive-by refactors.
+- Link paper/blotter/review events to `decision_id` when touching those flows.
+- Explain feed categories include `broker`, `paper`, `review` (see `models.py` / `event_store.py`).
+- Only commit when the user explicitly asks.
+- Do not create new architecture markdown duplicates.
+- **Always sync docs** per "Mandatory documentation sync" above when behavior/API/UI/config changes.
+
+## Tests and run
+
+```bash
+cd backend && poetry run pytest
+cd frontend && npm run build
+./run_local.sh
+```

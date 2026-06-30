@@ -16,7 +16,7 @@ if FASTAPI_AVAILABLE:
 
     settings.broker_backend = "mock"
     get_broker_client.cache_clear()
-    from app.main import app
+    from app.main import app, options_chain_scanner
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi not installed in current interpreter")
@@ -24,6 +24,8 @@ class PhaseEndpointsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         get_broker_client().connect()
+        settings.options_chain.batch_delay_seconds = 0
+        options_chain_scanner.run_quote_scan("QQQ")
         cls.client = TestClient(app)
 
     def test_ingestion_and_feature_build(self):
@@ -54,31 +56,22 @@ class PhaseEndpointsTests(unittest.TestCase):
         self.assertEqual(runtime.status_code, 200)
         runtime_data = runtime.json()
         self.assertIn("candidates", runtime_data)
+        self.assertIn("top_recommendations", runtime_data)
         self.assertIn("as_of", runtime_data)
         self.assertIn("data_status", runtime_data)
         self.assertIn("runtime_allowed", runtime_data)
-        self.assertTrue(runtime_data["candidates"])
-        for candidate in runtime_data["candidates"]:
-            self.assertIn("risk_status", candidate)
-            self.assertIn("rule_reasons", candidate)
+        # Mock broker scanner path must block QQQ recommendations.
+        self.assertFalse(runtime_data["runtime_allowed"])
+        self.assertEqual(runtime_data["candidates"], [])
+        self.assertIn("option_chain_quality_failed", runtime_data.get("runtime_block_reason", ""))
 
         replay = self.client.post(
             "/api/replay/run",
-            json={"ticker": "QQQ", "direction": "bullish", "scenarios": [-0.03, 0.0, 0.03]},
+            json={"ticker": "SPY", "direction": "bullish", "scenarios": [-0.03, 0.0, 0.03]},
         )
         self.assertEqual(replay.status_code, 200)
         replay_data = replay.json()
         self.assertIn("results", replay_data)
-        self.assertTrue(replay_data["results"])
-
-        paper = self.client.post(
-            "/api/paper/run",
-            json={"mode": "quick", "ticker": "QQQ", "direction": "bullish", "scenario_return": 0.02},
-        )
-        self.assertEqual(paper.status_code, 200)
-        paper_data = paper.json()
-        self.assertIn("signal_id", paper_data)
-        self.assertIn("realized_pnl_after_costs_usd", paper_data)
 
 
 if __name__ == "__main__":

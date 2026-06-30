@@ -21,7 +21,7 @@ class RuntimeEnginesTests(unittest.TestCase):
             option_chain=option_chain,
             context_snapshot=context,
         )
-        rows = run_strategy_runtime(
+        rows, _leg_diag = run_strategy_runtime(
             ticker="QQQ",
             direction="bullish",
             market_snapshot=market,

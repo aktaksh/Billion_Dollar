@@ -706,8 +706,10 @@ class StrategyCandidateOut(BaseModel):
     gamma_score: float
     liquidity_score: float
     strategy_score: float
-    risk_status: Literal["allow", "reject", "override_required"]
+    risk_status: Literal["allow", "reject", "override_required", "watch_only"]
     rule_reasons: list[dict[str, Any]] = Field(default_factory=list)
+    setup_status: Literal["confirmed", "mixed", "conflict"] | None = None
+    breakeven_distance_pct: float | None = None
 
 
 class StrategyBuilderCandidatesOut(BaseModel):
@@ -771,10 +773,20 @@ class StrategyRuntimeOut(BaseModel):
     feature_snapshot_ref: str
     option_chain_snapshot_ref: str
     candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    top_recommendations: list[StrategyCandidateOut] = Field(default_factory=list)
+    allowed_candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    override_required_candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    watch_only_candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    rejected_candidates: list[StrategyCandidateOut] = Field(default_factory=list)
+    setup_status: Literal["confirmed", "mixed", "conflict"] | None = None
+    setup_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    no_trade: bool = False
+    chain_diagnostics: dict[str, Any] = Field(default_factory=dict)
     as_of: datetime
     data_status: DataStatus = "live"
     runtime_allowed: bool = True
     runtime_block_reason: str | None = None
+    runtime_warning: str | None = None
 
 
 class ReplayRunIn(BaseModel):
@@ -843,12 +855,38 @@ class ShellStatusOut(BaseModel):
     can_open_new_entries: bool
     active_halts: list[str] = Field(default_factory=list)
     runtime_block_reason: str | None = None
+    options_chain_scanner_status: str | None = None
+    options_chain_default_symbol: str | None = None
 
 
 class OpsMetricsOut(BaseModel):
     as_of: datetime
     requests: dict[str, int] = Field(default_factory=dict)
     errors: dict[str, int] = Field(default_factory=dict)
+
+
+class DevFlagsOut(BaseModel):
+    as_of: datetime
+    runtime_mode: Literal["production", "testing"] = "production"
+    allow_stale_runtime_dev: bool = False
+    chain_origin: str = "none"
+    is_production_valid_chain: bool = False
+
+
+class RuntimeModeIn(BaseModel):
+    mode: Literal["production", "testing"]
+
+
+class RuntimeModeOut(BaseModel):
+    as_of: datetime
+    runtime_mode: Literal["production", "testing"]
+    allow_stale_runtime_dev: bool
+    chain_origin: str = "none"
+    is_production_valid_chain: bool = False
+    scanner_status: str | None = None
+    last_scan_completed_at: datetime | None = None
+    next_action: str | None = None
+    message: str | None = None
 
 
 class BrokerStatusOut(BaseModel):
@@ -1023,4 +1061,76 @@ class TradeReviewClassifyOut(BaseModel):
     decision_id: str
     final_outcome: DecisionFinalOutcome
     review_status: DecisionReviewStatus
+
+
+ScannerStatus = Literal["idle", "scanning", "fresh", "stale", "partial", "failed"]
+
+
+class OptionsChainContractRow(BaseModel):
+    expiry: str
+    dte: int
+    option_type: str
+    strike: float
+    bid: float
+    ask: float
+    last: float | None = None
+    mid: float
+    spread_pct: float
+    volume: int
+    open_interest: int
+    iv: float
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    status: str
+    rejection_reason: str | None = None
+
+
+class OptionsChainScanStatusOut(BaseModel):
+    symbol: str
+    scanner_status: ScannerStatus
+    chain_source: str
+    last_scan_started_at: datetime | None = None
+    last_scan_completed_at: datetime | None = None
+    last_error: str | None = None
+    expiries_selected: list[str] = Field(default_factory=list)
+    strike_low: float | None = None
+    strike_high: float | None = None
+    underlying_price: float | None = None
+    contracts_scanned: int = 0
+    contracts_rejected: int = 0
+    contracts_usable: int = 0
+
+
+class OptionsChainSnapshotOut(BaseModel):
+    as_of: datetime
+    symbol: str
+    data_status: DataStatus
+    scanner_status: ScannerStatus
+    chain_source: str
+    last_scan_completed_at: datetime | None = None
+    expiries_selected: list[str] = Field(default_factory=list)
+    strike_low: float | None = None
+    strike_high: float | None = None
+    underlying_price: float | None = None
+    contracts_scanned: int = 0
+    contracts_rejected: int = 0
+    contracts_usable: int = 0
+    contracts_planned: int = 0
+    scan_notes: list[str] = Field(default_factory=list)
+    last_error: str | None = None
+    chain_origin: str = "none"
+    runtime_mode: Literal["production", "testing"] = "production"
+    is_production_valid_chain: bool = False
+    allow_stale_runtime_dev: bool = False
+    contracts: list[OptionsChainContractRow] = Field(default_factory=list)
+
+
+class OptionsChainRefreshOut(BaseModel):
+    as_of: datetime
+    symbol: str
+    enqueued: bool
+    scanner_status: ScannerStatus
+    message: str
 

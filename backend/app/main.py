@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 import hashlib
 import json
+import threading
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -80,6 +82,13 @@ from app.models import (
     EnrichedRecommendation,
     TradeReviewCompleteIn,
     TradeReviewClassifyOut,
+    OptionsChainSnapshotOut,
+    OptionsChainRefreshOut,
+    OptionsChainContractRow,
+    OptionsChainScanStatusOut,
+    DevFlagsOut,
+    RuntimeModeIn,
+    RuntimeModeOut,
 )
 from app.engines.feature_engine import build_symbol_features
 from app.engines.ingestion_engine import (
@@ -91,6 +100,7 @@ from app.engines.ingestion_engine import (
 from app.engines.paper_trade_engine import simulate_paper_trade
 from app.engines.replay_engine import replay_candidates_under_scenarios
 from app.engines.strategy_runtime_engine import run_strategy_runtime
+from app.engines.setup_confirmation import evaluate_setup_status
 from app.engines.strategy_builder_engine import build_and_rank_candidates
 from app.services.event_store import (
     active_universe_view,
@@ -114,13 +124,31 @@ from app.services.decision_store import dashboard_summary, get_decision, list_de
 from app.services.decisions_service import enriched_recommendations, save_decision_from_candidate
 from app.services.paper_decision_service import run_paper_for_decision
 from app.services.broker_session import connect_broker_session, evaluate_broker_connection
-from app.services.broker_status import runtime_gate_status, snapshot_data_status
+from app.services.broker_endpoint import connect_setup_hint, format_broker_endpoint
+from app.services.broker_status import (
+    chain_runtime_gate_status,
+    runtime_gate_status,
+    scan_age_seconds,
+    snapshot_data_status,
+)
+from app.services.chain_fixture_seed import seed_testing_fixture
+from app.services.runtime_mode import (
+    apply_startup_runtime_mode_override,
+    get_runtime_mode,
+    resolve_allow_stale_runtime_dev,
+    runtime_flags_for_symbol,
+    set_runtime_mode,
+)
 from app.services.observability import log_runtime_event, metrics_snapshot, request_timing_middleware
+from app.services.options_chain_scanner import OptionsChainScanner, reset_scan_lock
+from app.services.options_chain_store import get_latest_snapshot, get_scan_status, invalidate_mock_scanner_cache, recover_stuck_scan_if_needed, update_scan_status
+from app.workers.options_chain_scheduler import OptionsChainScheduler
 from app.workers.reconcile_worker import ReconcileWorker
 from app.workers.tws_connection_worker import TwsConnectionWorker
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 engine = get_engine()
+init_db(engine)
 broker_client = get_broker_client()
 
 app.add_middleware(
@@ -137,6 +165,35 @@ app.add_middleware(
 
 def _broker_state() -> dict:
     return evaluate_broker_connection()
+
+
+def _chain_origin_for_symbol(symbol: str) -> str:
+    status = get_scan_status(engine, symbol.strip().upper()) or {}
+    chain_source = str(status.get("chain_source") or "none").strip().lower()
+    contracts_usable = int(status.get("contracts_usable") or 0)
+    origin = str(status.get("chain_origin") or "none").strip().lower()
+    notes_blob = " ".join(str(note) for note in (status.get("scan_notes") or [])).lower()
+    if "testing fixture" in notes_blob or "seeded snapshot" in notes_blob:
+        return "seeded_fixture"
+    if chain_source == "none" and contracts_usable == 0:
+        return "none"
+    return origin if origin not in {"", "none"} else "none"
+
+
+def _runtime_mode_flags(symbol: str = "QQQ") -> dict[str, Any]:
+    sym = symbol.strip().upper()
+    status = get_scan_status(engine, sym) or {}
+    return runtime_flags_for_symbol(
+        engine,
+        chain_origin=_chain_origin_for_symbol(sym),
+        chain_source=str(status.get("chain_source") or "none"),
+        contracts_usable=int(status.get("contracts_usable") or 0),
+        scanner_status=str(status.get("scanner_status") or "idle"),
+    )
+
+
+def _allow_stale_runtime_dev() -> bool:
+    return resolve_allow_stale_runtime_dev(engine)
 
 
 def _broker_data_status(broker: dict) -> str:
@@ -197,7 +254,8 @@ def _broker_heartbeat_once() -> None:
 
 
 def _broker_reconnect_once() -> None:
-    broker_client.connect()
+    if not _broker_state().get("connected"):
+        broker_client.connect()
 
 
 tws_connection_worker = TwsConnectionWorker(
@@ -207,19 +265,45 @@ tws_connection_worker = TwsConnectionWorker(
 )
 
 
+def _clear_stale_scanner_disconnect_errors() -> None:
+    if not settings.options_chain.enabled:
+        return
+    for symbol in settings.options_chain.symbols:
+        sym = symbol.strip().upper()
+        if not sym:
+            continue
+        row = get_scan_status(engine, sym) or {}
+        last_error = str(row.get("last_error") or "")
+        scanner_status = str(row.get("scanner_status") or "")
+        fields: dict[str, object] = {}
+        recoverable = (
+            "broker disconnected" in last_error.lower()
+            or "scan timed out" in last_error.lower()
+        )
+        if recoverable:
+            fields["last_error"] = None
+        if scanner_status in {"scanning", "failed"} and recoverable:
+            fields["scanner_status"] = "idle"
+        if fields:
+            update_scan_status(engine, sym, **fields)
+
+
 def _broker_status_out() -> BrokerStatusOut:
     now = datetime.now(UTC)
     broker = _broker_state()
     data_status = _broker_data_status(broker)
     tws_reachable = bool(broker.get("tws_reachable") or broker.get("gateway_reachable"))
+    host = str(broker.get("tws_host", settings.tws_host))
+    port = int(broker.get("tws_port", settings.tws_port))
+    endpoint = format_broker_endpoint(host, port)
     if not tws_reachable:
-        message = "Start TWS paper, enable API (read-only), port 7497, then Connect Broker."
-        next_action = "start_tws_paper"
+        message = connect_setup_hint(host, port)
+        next_action = "start_ibkr_api"
     elif not broker.get("authenticated"):
-        message = "TWS is reachable but not connected. Click Connect Broker."
+        message = f"IBKR API port is open but not connected. Click Connect Broker for {endpoint}."
         next_action = "connect_tws"
     else:
-        message = "TWS read-only session is live."
+        message = f"Read-only session is live on {endpoint}."
         next_action = "run_ingestion"
     return BrokerStatusOut(
         as_of=now,
@@ -255,6 +339,12 @@ def _shell_status() -> ShellStatusOut:
         execution_mode = "halted"
     elif not risk.can_open_new_entries:
         execution_mode = "close_only"
+    scanner_status: str | None = None
+    if settings.options_chain.enabled:
+        sym = settings.options_chain.default_symbol
+        row = get_scan_status(engine, sym)
+        if row:
+            scanner_status = str(row.get("scanner_status", "idle"))
     return ShellStatusOut(
         as_of=now,
         broker_connected=bool(broker.get("connected")),
@@ -267,6 +357,8 @@ def _shell_status() -> ShellStatusOut:
         can_open_new_entries=risk.can_open_new_entries and runtime_allowed,
         active_halts=risk.active_halts,
         runtime_block_reason=None if runtime_allowed else runtime_block_reason,
+        options_chain_scanner_status=scanner_status,
+        options_chain_default_symbol=settings.options_chain.default_symbol if settings.options_chain.enabled else None,
     )
 
 
@@ -359,6 +451,61 @@ def _normalize_ticker(raw: str) -> str:
 def _event_trace(causation_id: str | None = None) -> tuple[str, str]:
     correlation_id = str(uuid4())
     return correlation_id, causation_id or correlation_id
+
+
+options_chain_scanner = OptionsChainScanner(
+    engine=engine,
+    broker=broker_client,
+    trace_fn=_event_trace,
+    broker_connected_fn=lambda: bool(_broker_state().get("connected")),
+)
+
+
+def _metadata_job(symbol: str) -> None:
+    options_chain_scanner.refresh_metadata(symbol)
+
+
+def _quote_job(symbol: str) -> None:
+    options_chain_scanner.run_quote_scan(symbol)
+    options_chain_scanner.mark_stale_if_needed(symbol)
+
+
+def _full_scan_job(symbol: str) -> None:
+    options_chain_scanner.refresh_metadata(symbol)
+    options_chain_scanner.run_quote_scan(symbol)
+    options_chain_scanner.mark_stale_if_needed(symbol)
+
+
+options_chain_scheduler = OptionsChainScheduler(
+    metadata_fn=_metadata_job,
+    quote_fn=_quote_job,
+    full_scan_fn=_full_scan_job,
+    broker_connected_fn=lambda: bool(_broker_state().get("connected")),
+)
+
+
+def _contracts_to_chain_rows(contracts: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for c in contracts:
+        rows.append(
+            {
+                "symbol": c.get("symbol", ""),
+                "expiry": c["expiry"],
+                "dte": c.get("dte", 0),
+                "option_type": c["option_type"],
+                "strike": c["strike"],
+                "bid": c.get("bid", 0),
+                "ask": c.get("ask", 0),
+                "volume": c.get("volume", 0),
+                "open_interest": c.get("open_interest", 0),
+                "delta": c.get("delta", 0),
+                "gamma": c.get("gamma", 0),
+                "theta": c.get("theta", 0),
+                "vega": c.get("vega", 0),
+                "iv": c.get("iv", 0),
+            }
+        )
+    return rows
 
 
 def _validate_ticker_via_broker(ticker: str) -> UniverseValidationResult:
@@ -670,11 +817,15 @@ def _run_feature_build_once(*, tickers: list[str]) -> FeatureBuildOut:
     for ticker in tickers:
         symbol = ticker.strip().upper()
         market = _latest_payload_by_event_ticker("MarketSnapshotCaptured", symbol)
-        options_payload = _latest_payload_by_event_ticker("OptionsChainSnapshotCaptured", symbol)
+        if settings.options_chain.is_scanner_symbol(symbol):
+            snapshot = get_latest_snapshot(engine, symbol)
+            option_rows = _contracts_to_chain_rows(snapshot.get("contracts", []))
+        else:
+            options_payload = _latest_payload_by_event_ticker("OptionsChainSnapshotCaptured", symbol)
+            option_rows = options_payload.get("rows", []) if options_payload else []
         context = _latest_payload_by_event_ticker("ContextSnapshotCaptured", symbol)
-        if not market or not options_payload:
+        if not market or not option_rows:
             continue
-        option_rows = options_payload.get("rows", [])
         if not isinstance(option_rows, list):
             option_rows = []
         features = build_symbol_features(
@@ -706,6 +857,118 @@ def _run_feature_build_once(*, tickers: list[str]) -> FeatureBuildOut:
     )
 
 
+def _resolve_scanner_underlying_price(
+    scan_st: dict[str, Any],
+    market: dict[str, Any] | None,
+    feature: dict[str, Any] | None,
+) -> tuple[float, str]:
+    if scan_st.get("underlying_price"):
+        return float(scan_st["underlying_price"]), "scanner"
+    if market and market.get("last"):
+        return float(market["last"]), "market"
+    if feature and feature.get("last_price"):
+        return float(feature["last_price"]), "feature"
+    return 0.0, "none"
+
+
+def _build_chain_diagnostics(
+    *,
+    data_status: str,
+    chain_source: str,
+    scanner_status: str,
+    underlying_price: float,
+    underlying_price_source: str,
+    snapshot_age_seconds: float | None,
+    quality_diag: dict[str, Any],
+    leg_diag: dict[str, int] | None = None,
+    feature_last_price: float | None = None,
+) -> dict[str, Any]:
+    raw = int(quality_diag.get("raw_contracts") or (leg_diag.get("raw_contracts", 0) if leg_diag else 0))
+    usable = int(
+        leg_diag.get("usable_contracts", 0)
+        if leg_diag
+        else quality_diag.get("quoted_contracts") or 0
+    )
+    rejected = max(0, raw - usable) if leg_diag else max(0, raw - int(quality_diag.get("quoted_contracts") or 0))
+    diagnostics: dict[str, Any] = {
+        "data_status": data_status,
+        "chain_source": chain_source,
+        "scanner_status": scanner_status,
+        "underlying_price": underlying_price,
+        "underlying_price_source": underlying_price_source,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "nearest_strike_distance_pct": quality_diag.get("nearest_strike_distance_pct"),
+        "usable_contracts": usable,
+        "rejected_contracts": rejected,
+        **quality_diag,
+        **(leg_diag or {}),
+    }
+    if feature_last_price is not None and underlying_price > 0:
+        diagnostics["feature_last_price"] = feature_last_price
+        divergence_pct = abs(feature_last_price - underlying_price) / underlying_price
+        diagnostics["feature_price_divergence_pct"] = round(divergence_pct, 4)
+        if divergence_pct > 0.01:
+            diagnostics["underlying_price_warning"] = (
+                f"Feature last_price ({feature_last_price}) differs from runtime underlying ({underlying_price})"
+            )
+    return diagnostics
+
+
+_DEBIT_SPREAD_TYPES = frozenset({"bull_call_debit_spread", "bear_put_debit_spread"})
+
+
+def _prioritize_spreads_for_top(candidates: list[StrategyCandidateOut]) -> list[StrategyCandidateOut]:
+    spreads = [c for c in candidates if c.strategy_type in _DEBIT_SPREAD_TYPES]
+    others = [c for c in candidates if c.strategy_type not in _DEBIT_SPREAD_TYPES]
+    return spreads + others
+
+
+def _build_setup_runtime_fields(
+    *,
+    feature: dict[str, Any] | None,
+    direction: str,
+    last_price: float,
+    runtime_allowed: bool,
+    allowed_count: int,
+) -> dict[str, Any]:
+    if not feature or last_price <= 0:
+        return {"setup_status": None, "setup_diagnostics": {}, "no_trade": False}
+    setup_eval = evaluate_setup_status(
+        direction=direction,  # type: ignore[arg-type]
+        price=last_price,
+        vwap=float(feature.get("vwap", last_price)),
+        ema_20=float(feature.get("ema_20", last_price)),
+        ema_20_slope=float(feature.get("ema_20_slope", 0.0)),
+        rsi_14=float(feature.get("rsi_14", 50.0)),
+    )
+    setup_diagnostics = setup_eval.as_dict()
+    setup_diagnostics["regime"] = str(feature.get("regime") or "neutral")
+    return {
+        "setup_status": setup_eval.setup_status,
+        "setup_diagnostics": setup_diagnostics,
+        "no_trade": bool(runtime_allowed and allowed_count == 0),
+    }
+
+
+def _partition_runtime_candidates(candidates: list[dict]) -> dict[str, Any]:
+    allowed = [StrategyCandidateOut(**row) for row in candidates if row.get("risk_status") == "allow"]
+    override_required = [
+        StrategyCandidateOut(**row) for row in candidates if row.get("risk_status") == "override_required"
+    ]
+    watch_only = [StrategyCandidateOut(**row) for row in candidates if row.get("risk_status") == "watch_only"]
+    rejected = [StrategyCandidateOut(**row) for row in candidates if row.get("risk_status") == "reject"]
+    ordered = allowed + override_required + watch_only + rejected
+    top_allowed = _prioritize_spreads_for_top(allowed)
+    return {
+        "candidates": ordered,
+        "top_recommendations": top_allowed[:3],
+        "allowed_candidates": allowed,
+        "override_required_candidates": override_required,
+        "watch_only_candidates": watch_only,
+        "rejected_candidates": rejected,
+    }
+
+
 def _run_strategy_runtime_once(
     *,
     ticker: str,
@@ -714,6 +977,153 @@ def _run_strategy_runtime_once(
     thresholds: dict[str, float],
 ) -> StrategyRuntimeOut:
     symbol = ticker.strip().upper()
+    broker = _broker_state()
+    broker_connected = bool(broker.get("connected"))
+
+    if settings.options_chain.is_scanner_symbol(symbol):
+        options_chain_scanner.mark_stale_if_needed(symbol)
+        snapshot = get_latest_snapshot(engine, symbol)
+        scan_st = snapshot.get("scan_status") or {}
+        scanner_status = str(scan_st.get("scanner_status", "idle"))
+        chain_source = str(snapshot.get("chain_source") or "none")
+        data_status = str(snapshot.get("data_status") or "unavailable")
+        options_rows = _contracts_to_chain_rows(snapshot.get("contracts", []))
+        captured_at = scan_st.get("last_scan_completed_at")
+        market = _latest_payload_by_event_ticker("MarketSnapshotCaptured", symbol)
+        if not market and scan_st.get("underlying_price"):
+            market = {
+                "ticker": symbol,
+                "last": float(scan_st["underlying_price"]),
+                "captured_at": str(captured_at or datetime.now(UTC).isoformat()),
+            }
+        feature = _latest_payload_by_event_ticker("SymbolFeatureSnapshotBuilt", symbol)
+        if not feature and market and options_rows:
+            _run_feature_build_once(tickers=[symbol])
+            feature = _latest_payload_by_event_ticker("SymbolFeatureSnapshotBuilt", symbol)
+        if not market or not options_rows:
+            return StrategyRuntimeOut(
+                ticker=symbol,
+                direction=direction,  # type: ignore[arg-type]
+                feature_snapshot_ref=f"evt:SymbolFeatureSnapshotBuilt:{symbol}",
+                option_chain_snapshot_ref=f"scanner:{symbol}",
+                candidates=[],
+                as_of=datetime.now(UTC),
+                data_status=data_status,  # type: ignore[arg-type]
+                runtime_allowed=False,
+                runtime_block_reason="chain_unavailable",
+            )
+        contracts_usable = int(scan_st.get("contracts_usable") or 0)
+        underlying_price, underlying_price_source = _resolve_scanner_underlying_price(scan_st, market, feature)
+        feature_last_price = float(feature.get("last_price")) if feature and feature.get("last_price") else None
+        snapshot_age = scan_age_seconds(captured_at)
+        chain_origin = _chain_origin_for_symbol(symbol)
+        runtime_mode = get_runtime_mode(engine)
+        allow_stale = _allow_stale_runtime_dev()
+        quality_ok, quality_reason, quality_diag = validate_chain_quality(
+            symbol=symbol,
+            option_chain_rows=options_rows,
+            underlying_price=underlying_price,
+            chain_source=chain_source,
+            scanner_status=scanner_status,
+            data_status=data_status,
+            snapshot_age_seconds=snapshot_age,
+            max_runtime_age_seconds=settings.options_chain.runtime_max_age_seconds,
+            contracts_usable=contracts_usable,
+            allow_stale_runtime_dev=allow_stale,
+            chain_origin=chain_origin,
+            runtime_mode=runtime_mode,
+        )
+        chain_ok, chain_reason, runtime_warning = chain_runtime_gate_status(
+            scanner_status=scanner_status,
+            data_status=data_status,
+            chain_source=chain_source,
+            allow_mock_option_chain=False,
+            last_scan_completed_at=captured_at,
+            contracts_usable=contracts_usable,
+            max_runtime_age_seconds=settings.options_chain.runtime_max_age_seconds,
+            allow_stale_runtime_dev=allow_stale,
+        )
+        if (
+            allow_stale
+            and scanner_status == "stale"
+            and chain_source == "broker"
+            and contracts_usable >= 10
+        ):
+            log_runtime_event(
+                event="dev_stale_runtime_mode",
+                symbol=symbol,
+                contracts_usable=contracts_usable,
+                scanner_status=scanner_status,
+            )
+        runtime_allowed, runtime_block_reason = runtime_gate_status(
+            broker_connected=broker_connected,
+            data_status=data_status,  # type: ignore[arg-type]
+            reconciliation_mismatch_active=reconciliation_mismatch_active,
+            allow_mock_option_chain=False,
+            allow_cached_chain=chain_ok and runtime_warning is not None,
+        )
+        if not quality_ok:
+            runtime_allowed = False
+            runtime_block_reason = quality_reason
+            runtime_warning = None
+        elif not chain_ok:
+            runtime_allowed = False
+            runtime_block_reason = chain_reason
+            runtime_warning = None
+        candidates: list[dict] = []
+        leg_diag: dict[str, int] | None = None
+        if runtime_allowed and feature:
+            candidates, leg_diag = run_strategy_runtime(
+                ticker=symbol,
+                direction=direction,
+                market_snapshot=market,
+                feature_snapshot=feature,
+                option_chain_snapshot=options_rows,
+                reconciliation_mismatch_active=reconciliation_mismatch_active,
+                thresholds=thresholds,
+                underlying_price=underlying_price,
+            )
+        partitioned = _partition_runtime_candidates(candidates)
+        setup_fields = _build_setup_runtime_fields(
+            feature=feature,
+            direction=direction,
+            last_price=underlying_price,
+            runtime_allowed=runtime_allowed,
+            allowed_count=len(partitioned["allowed_candidates"]),
+        )
+        chain_diagnostics = _build_chain_diagnostics(
+            data_status=data_status,
+            chain_source=chain_source,
+            scanner_status=scanner_status,
+            underlying_price=underlying_price,
+            underlying_price_source=underlying_price_source,
+            snapshot_age_seconds=snapshot_age,
+            quality_diag=quality_diag,
+            leg_diag=leg_diag,
+            feature_last_price=feature_last_price,
+        )
+        return StrategyRuntimeOut(
+            ticker=symbol,
+            direction=direction,  # type: ignore[arg-type]
+            feature_snapshot_ref=f"evt:SymbolFeatureSnapshotBuilt:{symbol}",
+            option_chain_snapshot_ref=f"scanner:{symbol}:{scan_st.get('scan_run_id', 'latest')}",
+            candidates=partitioned["candidates"],
+            top_recommendations=partitioned["top_recommendations"],
+            allowed_candidates=partitioned["allowed_candidates"],
+            override_required_candidates=partitioned["override_required_candidates"],
+            watch_only_candidates=partitioned["watch_only_candidates"],
+            rejected_candidates=partitioned["rejected_candidates"],
+            setup_status=setup_fields["setup_status"],
+            setup_diagnostics=setup_fields["setup_diagnostics"],
+            no_trade=setup_fields["no_trade"],
+            chain_diagnostics=chain_diagnostics,
+            as_of=datetime.now(UTC),
+            data_status=data_status,  # type: ignore[arg-type]
+            runtime_allowed=runtime_allowed,
+            runtime_block_reason=runtime_block_reason if not runtime_allowed else None,
+            runtime_warning=runtime_warning,
+        )
+
     market = _latest_payload_by_event_ticker("MarketSnapshotCaptured", symbol)
     options_payload = _latest_payload_by_event_ticker("OptionsChainSnapshotCaptured", symbol)
     feature = _latest_payload_by_event_ticker("SymbolFeatureSnapshotBuilt", symbol)
@@ -744,8 +1154,9 @@ def _run_strategy_runtime_once(
         allow_mock_option_chain=settings.allow_mock_option_chain,
     )
     candidates: list[dict] = []
+    leg_diag: dict[str, int] | None = None
     if runtime_allowed:
-        candidates = run_strategy_runtime(
+        candidates, leg_diag = run_strategy_runtime(
             ticker=symbol,
             direction=direction,
             market_snapshot=market,
@@ -754,12 +1165,45 @@ def _run_strategy_runtime_once(
             reconciliation_mismatch_active=reconciliation_mismatch_active,
             thresholds=thresholds,
         )
+    partitioned = _partition_runtime_candidates(candidates)
+    setup_last_price = float(feature.get("last_price", market.get("last", 0.0)))
+    setup_fields = _build_setup_runtime_fields(
+        feature=feature,
+        direction=direction,
+        last_price=setup_last_price,
+        runtime_allowed=runtime_allowed,
+        allowed_count=len(partitioned["allowed_candidates"]),
+    )
     return StrategyRuntimeOut(
         ticker=symbol,
         direction=direction,  # type: ignore[arg-type]
         feature_snapshot_ref=f"evt:SymbolFeatureSnapshotBuilt:{symbol}",
         option_chain_snapshot_ref=f"evt:OptionsChainSnapshotCaptured:{symbol}",
-        candidates=[StrategyCandidateOut(**row) for row in candidates],
+        candidates=partitioned["candidates"],
+        top_recommendations=partitioned["top_recommendations"],
+        allowed_candidates=partitioned["allowed_candidates"],
+        override_required_candidates=partitioned["override_required_candidates"],
+        watch_only_candidates=partitioned["watch_only_candidates"],
+        rejected_candidates=partitioned["rejected_candidates"],
+        setup_status=setup_fields["setup_status"],
+        setup_diagnostics=setup_fields["setup_diagnostics"],
+        no_trade=setup_fields["no_trade"],
+        chain_diagnostics=_build_chain_diagnostics(
+            data_status=data_status,
+            chain_source=chain_source,
+            scanner_status="legacy",
+            underlying_price=float(feature.get("last_price", market.get("last", 0.0))),
+            underlying_price_source=(
+                "feature"
+                if feature.get("last_price")
+                else "market"
+                if market.get("last")
+                else "none"
+            ),
+            snapshot_age_seconds=None,
+            quality_diag={"raw_contracts": len(options_rows)},
+            leg_diag=leg_diag,
+        ),
         as_of=datetime.now(UTC),
         data_status=data_status,
         runtime_allowed=runtime_allowed,
@@ -857,23 +1301,62 @@ def _write_candidate_signal_event(payload: CandidateSignalIn) -> EventWriteRespo
     return EventWriteResponse(event_id=event_id, event_type="CandidateSignal", aggregate_id=payload.signal_id)
 
 
+def _reset_interrupted_option_scans() -> None:
+    """Clear scans left in 'scanning' after a crash/reload so scheduler can run again."""
+    if not settings.options_chain.enabled:
+        return
+    for symbol in settings.options_chain.symbols:
+        sym = symbol.strip().upper()
+        if not sym:
+            continue
+        status = get_scan_status(engine, sym) or {}
+        if status.get("scanner_status") != "scanning":
+            continue
+        update_scan_status(
+            engine,
+            sym,
+            scanner_status="failed",
+            last_error="interrupted scan reset on startup; refresh to rescan",
+        )
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_db(engine)
+    mode = apply_startup_runtime_mode_override(engine)
     _seed_if_empty()
+    _reset_interrupted_option_scans()
     reconcile_worker.start()
     tws_connection_worker.start()
+    options_chain_scheduler.start()
+    if settings.options_chain.enabled:
+        for symbol in settings.options_chain.symbols:
+            sym = symbol.strip().upper()
+            if not sym:
+                continue
+            scan = get_scan_status(engine, sym) or {}
+            usable = int(scan.get("contracts_usable") or 0)
+            if mode == "testing" and usable < 10:
+                try:
+                    seed_testing_fixture(engine, symbol=sym)
+                except Exception as exc:
+                    log_runtime_event(event="testing_fixture_seed_failed", symbol=sym, error=str(exc))
+            elif mode == "production" and _broker_state().get("connected"):
+                options_chain_scheduler.trigger_full_scan(sym)
     if settings.auto_ingestion_on_startup:
         tickers = _active_or_default_tickers([])
-        if tickers:
-            _run_ingestion_once(tickers=tickers, include_news=False)
-            _run_feature_build_once(tickers=tickers)
+        scanner_syms = {s.upper() for s in settings.options_chain.symbols if settings.options_chain.enabled}
+        ingest_tickers = [t for t in tickers if t not in scanner_syms]
+        if ingest_tickers:
+            _run_ingestion_once(tickers=ingest_tickers, include_news=False)
+            _run_feature_build_once(tickers=ingest_tickers)
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     reconcile_worker.stop()
     tws_connection_worker.stop()
+    options_chain_scheduler.stop()
     broker_client.disconnect()
 
 
@@ -901,6 +1384,66 @@ def shell_status() -> ShellStatusOut:
 def ops_metrics() -> OpsMetricsOut:
     snapshot = metrics_snapshot()
     return OpsMetricsOut(as_of=datetime.now(UTC), requests=snapshot["requests"], errors=snapshot["errors"])
+
+
+@app.get("/api/ops/dev-flags", response_model=DevFlagsOut)
+def dev_flags(symbol: str = Query(default="QQQ")) -> DevFlagsOut:
+    flags = _runtime_mode_flags(symbol)
+    return DevFlagsOut(
+        as_of=datetime.now(UTC),
+        runtime_mode=flags["runtime_mode"],  # type: ignore[arg-type]
+        allow_stale_runtime_dev=bool(flags["allow_stale_runtime_dev"]),
+        chain_origin=str(flags["chain_origin"]),
+        is_production_valid_chain=bool(flags["is_production_valid_chain"]),
+    )
+
+
+def _runtime_mode_out(symbol: str = "QQQ", *, next_action: str | None = None, message: str | None = None) -> RuntimeModeOut:
+    sym = symbol.strip().upper()
+    scan = get_scan_status(engine, sym) or {}
+    flags = _runtime_mode_flags(sym)
+    completed = scan.get("last_scan_completed_at")
+    if isinstance(completed, str):
+        try:
+            completed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+        except ValueError:
+            completed = None
+    return RuntimeModeOut(
+        as_of=datetime.now(UTC),
+        runtime_mode=flags["runtime_mode"],  # type: ignore[arg-type]
+        allow_stale_runtime_dev=bool(flags["allow_stale_runtime_dev"]),
+        chain_origin=str(flags["chain_origin"]),
+        is_production_valid_chain=bool(flags["is_production_valid_chain"]),
+        scanner_status=str(scan.get("scanner_status") or "idle"),
+        last_scan_completed_at=completed if isinstance(completed, datetime) else None,
+        next_action=next_action,
+        message=message,
+    )
+
+
+@app.get("/api/ops/runtime-mode", response_model=RuntimeModeOut)
+def get_runtime_mode_endpoint(symbol: str = Query(default="QQQ")) -> RuntimeModeOut:
+    return _runtime_mode_out(symbol)
+
+
+@app.post("/api/ops/runtime-mode", response_model=RuntimeModeOut)
+def set_runtime_mode_endpoint(payload: RuntimeModeIn, symbol: str = Query(default="QQQ")) -> RuntimeModeOut:
+    sym = symbol.strip().upper()
+    mode = set_runtime_mode(engine, payload.mode)
+    next_action: str | None = None
+    message: str | None = None
+    if mode == "testing":
+        seed_testing_fixture(engine, symbol=sym)
+        message = f"Testing mode enabled; fixture loaded for {sym}"
+    else:
+        broker = _broker_state()
+        if broker.get("connected") and settings.options_chain.is_scanner_symbol(sym):
+            options_chain_scheduler.trigger_full_scan(sym)
+            message = f"Production mode enabled; live scan enqueued for {sym}"
+        else:
+            next_action = "connect_broker_then_refresh"
+            message = "Production mode enabled; connect broker and refresh QQQ for live market data"
+    return _runtime_mode_out(sym, next_action=next_action, message=message)
 
 
 @app.get("/api/ops/broker/status", response_model=BrokerStatusOut)
@@ -931,18 +1474,25 @@ def broker_connect(refresh_ingestion: bool = Query(default=True)) -> BrokerConne
     data_status: str = "disconnected"
     if status == "connected":
         data_status = "live"
+        _clear_stale_scanner_disconnect_errors()
+        tws_connection_worker.tick_once()
+        if settings.options_chain.enabled:
+            for sym in settings.options_chain.symbols:
+                target = sym.strip().upper()
+                if target and settings.options_chain.is_scanner_symbol(target):
+                    options_chain_scheduler.trigger_full_scan(target)
         if refresh_ingestion:
             tickers = _active_or_default_tickers([])
-            if tickers:
+
+            def _ingest_background() -> None:
                 try:
-                    ing = _run_ingestion_once(tickers=tickers, include_news=True)
+                    _run_ingestion_once(tickers=tickers, include_news=True)
                     _run_feature_build_once(tickers=tickers)
-                    ingestion_processed = ing.processed
-                    data_status = ing.data_status
                 except Exception as exc:
                     log_runtime_event(event="broker_connect_ingestion_error", error=str(exc))
-                    data_status = "degraded"
-        tws_connection_worker.tick_once()
+
+            if tickers:
+                threading.Thread(target=_ingest_background, daemon=True).start()
 
     return BrokerConnectOut(
         as_of=now,
@@ -1160,9 +1710,114 @@ def run_feature_build(payload: FeatureBuildIn) -> FeatureBuildOut:
 @app.post("/api/ops/scheduler/tick")
 def scheduler_tick() -> dict:
     tickers = _active_or_default_tickers([])
-    ing = _run_ingestion_once(tickers=tickers, include_news=False)
+    scanner_syms = {s.upper() for s in settings.options_chain.symbols if settings.options_chain.enabled}
+    ingest_tickers = [t for t in tickers if t not in scanner_syms]
+    ing_processed = 0
+    if ingest_tickers:
+        ing = _run_ingestion_once(tickers=ingest_tickers, include_news=False)
+        ing_processed = ing.processed
     feat = _run_feature_build_once(tickers=tickers)
-    return {"status": "ok", "tickers": tickers, "ingestion_processed": ing.processed, "features_built": feat.built}
+    return {
+        "status": "ok",
+        "tickers": tickers,
+        "ingestion_processed": ing_processed,
+        "features_built": feat.built,
+        "options_chain_scheduler": options_chain_scheduler.last_status,
+    }
+
+
+def _options_chain_snapshot_out(symbol: str) -> OptionsChainSnapshotOut:
+    sym = symbol.strip().upper()
+    recover_stuck_scan_if_needed(engine, sym, max_scan_seconds=60)
+    options_chain_scanner.mark_stale_if_needed(sym)
+    snapshot = get_latest_snapshot(engine, sym)
+    scan_st = snapshot.get("scan_status") or {}
+    contracts = [
+        OptionsChainContractRow(
+            expiry=str(c["expiry"]),
+            dte=int(c.get("dte") or 0),
+            option_type=str(c["option_type"]),
+            strike=float(c["strike"]),
+            bid=float(c.get("bid") or 0),
+            ask=float(c.get("ask") or 0),
+            last=float(c["last"]) if c.get("last") is not None else None,
+            mid=float(c.get("mid") or 0),
+            spread_pct=float(c.get("spread_pct") or 0),
+            volume=int(c.get("volume") or 0),
+            open_interest=int(c.get("open_interest") or 0),
+            iv=float(c.get("iv") or 0),
+            delta=float(c.get("delta") or 0),
+            gamma=float(c.get("gamma") or 0),
+            theta=float(c.get("theta") or 0),
+            vega=float(c.get("vega") or 0),
+            status=str(c.get("status") or "reject"),
+            rejection_reason=c.get("rejection_reason"),
+        )
+        for c in snapshot.get("contracts", [])
+    ]
+    completed = scan_st.get("last_scan_completed_at")
+    if isinstance(completed, str):
+        try:
+            completed = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+        except ValueError:
+            completed = None
+    flags = _runtime_mode_flags(sym)
+    return OptionsChainSnapshotOut(
+        as_of=datetime.now(UTC),
+        symbol=sym,
+        data_status=snapshot.get("data_status", "unavailable"),  # type: ignore[arg-type]
+        scanner_status=str(scan_st.get("scanner_status", "idle")),  # type: ignore[arg-type]
+        chain_source=str(snapshot.get("chain_source") or "none"),
+        last_scan_completed_at=completed,
+        expiries_selected=list(scan_st.get("expiries_selected") or []),
+        strike_low=scan_st.get("strike_low"),
+        strike_high=scan_st.get("strike_high"),
+        underlying_price=scan_st.get("underlying_price"),
+        contracts_scanned=int(scan_st.get("contracts_scanned") or 0),
+        contracts_rejected=int(scan_st.get("contracts_rejected") or 0),
+        contracts_usable=int(scan_st.get("contracts_usable") or 0),
+        contracts_planned=int(scan_st.get("contracts_planned") or 0),
+        scan_notes=list(scan_st.get("scan_notes") or []),
+        last_error=scan_st.get("last_error"),
+        chain_origin=str(scan_st.get("chain_origin") or "none"),
+        runtime_mode=flags["runtime_mode"],  # type: ignore[arg-type]
+        is_production_valid_chain=bool(flags["is_production_valid_chain"]),
+        allow_stale_runtime_dev=bool(flags["allow_stale_runtime_dev"]),
+        contracts=contracts,
+    )
+
+
+@app.get("/api/options-chain/{symbol}", response_model=OptionsChainSnapshotOut)
+def get_options_chain(symbol: str) -> OptionsChainSnapshotOut:
+    return _options_chain_snapshot_out(symbol)
+
+
+@app.post("/api/options-chain/{symbol}/refresh", response_model=OptionsChainRefreshOut)
+def refresh_options_chain(symbol: str) -> OptionsChainRefreshOut:
+    sym = symbol.strip().upper()
+    if not settings.options_chain.is_scanner_symbol(sym):
+        raise HTTPException(status_code=422, detail=f"Options chain scanner not enabled for {sym}")
+    row = get_scan_status(engine, sym) or {}
+    if row.get("scanner_status") == "scanning":
+        update_scan_status(
+            engine,
+            sym,
+            scanner_status="failed",
+            last_error="manual refresh reset previous scan",
+        )
+        reset_scan_lock(sym)
+    if settings.broker_backend == "tws":
+        invalidate_mock_scanner_cache(engine, sym)
+    enqueued = options_chain_scheduler.trigger_full_scan(sym)
+    row = get_scan_status(engine, sym) or {}
+    status = str(row.get("scanner_status", "idle"))
+    return OptionsChainRefreshOut(
+        as_of=datetime.now(UTC),
+        symbol=sym,
+        enqueued=enqueued,
+        scanner_status=status,  # type: ignore[arg-type]
+        message="Full scan enqueued" if enqueued else "Scan already running or scheduler unavailable",
+    )
 
 
 @app.post("/api/strategy-builder/runtime", response_model=StrategyRuntimeOut)

@@ -7,6 +7,25 @@ def rule(code: str, message: str, severity: str = "reject") -> dict[str, Any]:
     return {"rule_id": code, "message": message, "severity": severity}
 
 
+def apply_chain_quality_gate(
+    *,
+    scanner_status: str,
+    data_status: str,
+    chain_source: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    reasons: list[dict[str, Any]] = []
+    if chain_source in {"mock", "fallback", "none"}:
+        reasons.append(rule("OPT-CHAIN-001", f"Option chain source is {chain_source}", "reject"))
+        return "reject", reasons
+    if scanner_status in {"stale", "partial", "failed", "idle"}:
+        reasons.append(rule("OPT-CHAIN-001", f"Option chain scanner status is {scanner_status}", "reject"))
+        return "reject", reasons
+    if data_status in {"stale", "partial", "unavailable", "disconnected"}:
+        reasons.append(rule("OPT-CHAIN-001", f"Option chain data status is {data_status}", "reject"))
+        return "reject", reasons
+    return "allow", [rule("OPT-CHAIN-000", "Option chain snapshot quality OK", "allow")]
+
+
 def apply_risk_rules(
     *,
     strategy_type: str,

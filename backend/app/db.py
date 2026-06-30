@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Column, DateTime, Float, Index, Integer, MetaData, String, Table, create_engine, select
+from sqlalchemy import JSON, Column, DateTime, Float, Index, Integer, MetaData, String, Table, create_engine, inspect, select, text
 from sqlalchemy.engine import Engine
 
 from app.config import settings
@@ -93,6 +93,83 @@ Index("idx_event_log_idempotency_key", event_log.c.idempotency_key, unique=True)
 Index("idx_trade_decisions_symbol_created", trade_decisions.c.symbol, trade_decisions.c.created_at)
 Index("idx_trade_decisions_status", trade_decisions.c.current_status, trade_decisions.c.review_status)
 
+options_chain_metadata = Table(
+    "options_chain_metadata",
+    metadata,
+    Column("symbol", String(32), primary_key=True),
+    Column("exchange", String(32), nullable=False, default="SMART"),
+    Column("trading_class", String(64), nullable=True),
+    Column("expiries", JSON, nullable=False, default=list),
+    Column("strikes", JSON, nullable=False, default=list),
+    Column("refreshed_at", DateTime(timezone=True), nullable=False),
+)
+
+options_chain_scan_status = Table(
+    "options_chain_scan_status",
+    metadata,
+    Column("symbol", String(32), primary_key=True),
+    Column("scanner_status", String(32), nullable=False, default="idle"),
+    Column("chain_source", String(16), nullable=False, default="none"),
+    Column("last_scan_started_at", DateTime(timezone=True), nullable=True),
+    Column("last_scan_completed_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", String(512), nullable=True),
+    Column("expiries_selected", JSON, nullable=False, default=list),
+    Column("strike_low", Float, nullable=True),
+    Column("strike_high", Float, nullable=True),
+    Column("underlying_price", Float, nullable=True),
+    Column("contracts_scanned", Integer, nullable=False, default=0),
+    Column("contracts_rejected", Integer, nullable=False, default=0),
+    Column("contracts_usable", Integer, nullable=False, default=0),
+    Column("contracts_planned", Integer, nullable=False, default=0),
+    Column("scan_notes", JSON, nullable=False, default=list),
+    Column("scan_run_id", String(64), nullable=True),
+    Column("chain_origin", String(32), nullable=False, default="none"),
+)
+
+app_runtime_settings = Table(
+    "app_runtime_settings",
+    metadata,
+    Column("key", String(64), primary_key=True),
+    Column("value", String(256), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+option_chain_contracts = Table(
+    "option_chain_contracts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("symbol", String(32), nullable=False),
+    Column("scan_run_id", String(64), nullable=False),
+    Column("expiry", String(16), nullable=False),
+    Column("dte", Integer, nullable=False),
+    Column("option_type", String(8), nullable=False),
+    Column("strike", Float, nullable=False),
+    Column("bid", Float, nullable=False, default=0.0),
+    Column("ask", Float, nullable=False, default=0.0),
+    Column("last", Float, nullable=True),
+    Column("mid", Float, nullable=False, default=0.0),
+    Column("spread_pct", Float, nullable=False, default=0.0),
+    Column("volume", Integer, nullable=False, default=0),
+    Column("open_interest", Integer, nullable=False, default=0),
+    Column("iv", Float, nullable=False, default=0.0),
+    Column("delta", Float, nullable=False, default=0.0),
+    Column("gamma", Float, nullable=False, default=0.0),
+    Column("theta", Float, nullable=False, default=0.0),
+    Column("vega", Float, nullable=False, default=0.0),
+    Column("status", String(16), nullable=False, default="reject"),
+    Column("rejection_reason", String(256), nullable=True),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("idx_option_chain_contracts_symbol", option_chain_contracts.c.symbol, option_chain_contracts.c.captured_at)
+Index(
+    "idx_option_chain_contracts_key",
+    option_chain_contracts.c.symbol,
+    option_chain_contracts.c.expiry,
+    option_chain_contracts.c.strike,
+    option_chain_contracts.c.option_type,
+)
+
 
 def get_engine() -> Engine:
     return create_engine(settings.database_url, future=True)
@@ -100,6 +177,24 @@ def get_engine() -> Engine:
 
 def init_db(engine: Engine) -> None:
     metadata.create_all(engine)
+    _ensure_scan_status_columns(engine)
+
+
+def _ensure_scan_status_columns(engine: Engine) -> None:
+    insp = inspect(engine)
+    if insp.has_table("options_chain_scan_status"):
+        cols = {c["name"] for c in insp.get_columns("options_chain_scan_status")}
+        alters: list[str] = []
+        if "contracts_planned" not in cols:
+            alters.append("ALTER TABLE options_chain_scan_status ADD COLUMN contracts_planned INTEGER DEFAULT 0")
+        if "scan_notes" not in cols:
+            alters.append("ALTER TABLE options_chain_scan_status ADD COLUMN scan_notes TEXT DEFAULT '[]'")
+        if "chain_origin" not in cols:
+            alters.append("ALTER TABLE options_chain_scan_status ADD COLUMN chain_origin TEXT DEFAULT 'none'")
+        if alters:
+            with engine.begin() as conn:
+                for stmt in alters:
+                    conn.execute(text(stmt))
 
 
 def new_decision_id() -> str:

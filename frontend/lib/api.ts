@@ -13,6 +13,10 @@ import type {
   StrategyBuilderCandidatesIn,
   StrategyBuilderCandidatesOut,
   StrategyRuntimeOut,
+  OptionsChainSnapshotOut,
+  OptionsChainRefreshOut,
+  DevFlagsOut,
+  RuntimeModeOut,
   PaperTradeRunOut,
   StrategyHealthRow,
   TradeCard,
@@ -252,4 +256,33 @@ export function completeReview(decisionId: string, payload: { final_outcome: str
   });
 }
 
+export function getOptionsChain(symbol: string) {
+  return fetchJson<OptionsChainSnapshotOut>(`/api/options-chain/${encodeURIComponent(symbol.trim().toUpperCase())}`);
+}
+
+export function refreshOptionsChain(symbol: string) {
+  return fetchJsonWithInit<OptionsChainRefreshOut>(
+    `/api/options-chain/${encodeURIComponent(symbol.trim().toUpperCase())}/refresh`,
+    { method: "POST" },
+  );
+}
+
+export function getDevFlags() {
+  return fetchJson<DevFlagsOut>("/api/ops/dev-flags");
+}
+
+export function getRuntimeMode(symbol = "QQQ") {
+  return fetchJson<RuntimeModeOut>(`/api/ops/runtime-mode?symbol=${encodeURIComponent(symbol.trim().toUpperCase())}`);
+}
+
+export function setRuntimeMode(mode: "production" | "testing", symbol = "QQQ") {
+  return fetchJsonWithInit<RuntimeModeOut>(
+    `/api/ops/runtime-mode?symbol=${encodeURIComponent(symbol.trim().toUpperCase())}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    },
+  );
+}
 

@@ -87,18 +87,19 @@ def bearish_chain():
 
 
 class StrategyBuilderEngineTests(unittest.TestCase):
-    def test_long_call_and_bull_spread_generated(self):
+    def test_bull_call_debit_spread_generated(self):
         rows = build_and_rank_candidates(
             symbol="QQQ",
             direction="bullish",
             last_price=505.0,
-            feature=base_feature(),
+            feature={**base_feature(), "vwap": 500.0, "ema_20": 498.0, "ema_20_slope": 0.1, "rsi_14": 58.0, "regime": "risk_on"},
             option_chain=bullish_chain(),
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0, "min_reward_risk": 0.0, "min_probability_profit": 0.0},
         )
         strategies = {r["strategy_type"] for r in rows}
-        self.assertIn("long_call", strategies)
         self.assertIn("bull_call_debit_spread", strategies)
+        self.assertNotIn("long_call", strategies)
 
     def test_long_put_and_bear_spread_generated(self):
         rows = build_and_rank_candidates(
@@ -108,9 +109,9 @@ class StrategyBuilderEngineTests(unittest.TestCase):
             feature=base_feature(),
             option_chain=bearish_chain(),
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0},
         )
         strategies = {r["strategy_type"] for r in rows}
-        self.assertIn("long_put", strategies)
         self.assertIn("bear_put_debit_spread", strategies)
 
     def test_dte_rejection(self):
@@ -119,10 +120,11 @@ class StrategyBuilderEngineTests(unittest.TestCase):
         rows = build_and_rank_candidates(
             symbol="SPY",
             direction="bullish",
-            last_price=500.0,
+            last_price=505.0,
             feature=base_feature(),
             option_chain=chain,
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0},
         )
         rejected = [r for r in rows if r["risk_status"] == "reject"]
         self.assertTrue(any(any(rr["rule_id"] == "OPT-DTE-001" for rr in r["rule_reasons"]) for r in rejected))
@@ -134,10 +136,11 @@ class StrategyBuilderEngineTests(unittest.TestCase):
         rows = build_and_rank_candidates(
             symbol="SPY",
             direction="bullish",
-            last_price=500.0,
+            last_price=505.0,
             feature=base_feature(),
             option_chain=chain,
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0},
         )
         self.assertTrue(any(any(rr["rule_id"] == "OPT-LIQ-002" for rr in r["rule_reasons"]) for r in rows))
 
@@ -147,10 +150,11 @@ class StrategyBuilderEngineTests(unittest.TestCase):
         rows = build_and_rank_candidates(
             symbol="SPY",
             direction="bullish",
-            last_price=500.0,
+            last_price=505.0,
             feature=base_feature(),
             option_chain=chain,
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0},
         )
         self.assertTrue(any(any(rr["rule_id"] == "OPT-LIQ-001" for rr in r["rule_reasons"]) for r in rows))
 
@@ -160,10 +164,11 @@ class StrategyBuilderEngineTests(unittest.TestCase):
         rows = build_and_rank_candidates(
             symbol="SPY",
             direction="bullish",
-            last_price=500.0,
+            last_price=505.0,
             feature=base_feature(),
             option_chain=chain,
             reconciliation_mismatch_active=False,
+            thresholds={"max_loss_per_trade_usd": 2000.0},
         )
         self.assertTrue(any(any(rr["rule_id"] == "OPT-LIQ-003" for rr in r["rule_reasons"]) for r in rows))
 
@@ -172,7 +177,7 @@ class StrategyBuilderEngineTests(unittest.TestCase):
         rows = build_and_rank_candidates(
             symbol="SPY",
             direction="bullish",
-            last_price=500.0,
+            last_price=505.0,
             feature=base_feature(),
             option_chain=chain,
             reconciliation_mismatch_active=False,

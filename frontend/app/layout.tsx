@@ -3,6 +3,7 @@ import Image from "next/image";
 
 import GlobalTabs from "@/components/GlobalTabs";
 import GlobalStatus from "@/components/GlobalStatus";
+import RuntimeModeBanner from "@/components/RuntimeModeBanner";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import ThemeToggle from "@/components/ThemeToggle";
 import "./globals.css";
@@ -60,6 +61,7 @@ export default function RootLayout({
               <GlobalStatus />
             </header>
           </div>
+          <RuntimeModeBanner />
           <main>{children}</main>
         </ThemeProvider>
       </body>

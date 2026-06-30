@@ -926,6 +926,107 @@ The 145C is rejected because the bid/ask spread is too wide and open interest is
 Preferred spread: Buy 130C and sell 135C. Estimated debit is 2.10, max loss is 210, and breakeven is 132.10.
 ```
 
+## 18.1 QQQ Options Chain Scanner Design
+
+The Options Chain page and Strategy Builder must read **cached** option-chain snapshots from SQLite. Full chain fetching never runs inside a synchronous FastAPI request.
+
+### Scanner flow
+
+```mermaid
+flowchart TD
+  subgraph scheduler [APScheduler]
+    MetaJob[metadata_refresh_15to30m]
+    QuoteJob[quote_refresh_120s_QQQ]
+  end
+  subgraph gateway [TWS_API_Gateway]
+    SecDef[reqSecDefOptParams]
+    BatchQuotes[reqTickers_per_expiry_batch]
+  end
+  subgraph storage [SQLite]
+    MetaTbl[options_chain_metadata]
+    QuoteTbl[option_chain_contracts]
+    StatusTbl[options_chain_scan_status]
+    Events[(event_log)]
+  end
+  subgraph api [FastAPI_cached_only]
+    GET_chain["GET /api/options-chain/{symbol}"]
+    POST_refresh["POST /api/options-chain/{symbol}/refresh"]
+  end
+  subgraph consumers [Read_only_consumers]
+    OptPage[Options_Chain_page]
+    StratBuilder[Strategy_Runtime_Engine]
+    RiskEng[Risk_Engine]
+  end
+  MetaJob --> SecDef --> MetaTbl
+  QuoteJob --> BatchQuotes --> QuoteTbl
+  BatchQuotes --> Events
+  GET_chain --> QuoteTbl
+  GET_chain --> StatusTbl
+  POST_refresh --> scheduler
+  OptPage --> GET_chain
+  StratBuilder --> QuoteTbl
+  RiskEng --> StatusTbl
+```
+
+### Non-negotiable rules
+
+1. Frontend never calls TWS; only backend REST.
+2. `GET /api/options-chain/{symbol}` returns cache only; `POST .../refresh` enqueues background work and returns immediately.
+3. Metadata discovery uses **`reqSecDefOptParams` only** — no broad `reqContractDetails` sweeps for full-chain discovery.
+4. Metadata cached in `options_chain_metadata`; refresh at startup and every `metadata_refresh_minutes` (15–30).
+5. Quote scan starts with **QQQ** (`options_chain.symbols` in `config.yaml`); other symbols keep legacy ingestion until enabled.
+6. **Bounded MVP subset only** — do not scan the full dense QQQ chain:
+   - DTE filter: **14–42 days** (2–6 weeks).
+   - **Max 4 expiries** within that window (nearest first).
+   - **8 listed $5 strikes below** spot and **12 listed $5 strikes above** spot (IBKR secdef only; exact $5 multiples).
+   - Calls and puts; target **~100–200 contracts** per cycle.
+   - **Hard cap 200** contracts per scan (`max_contracts_per_scan`); truncate expiries first, then widen interval — never blindly overrun.
+7. Batch by expiry; **one expiry at a time**; **5 seconds** between expiry batches (`batch_delay_seconds`); full cycle ~**45–60 seconds**.
+8. Quote refresh cycle ~**120 seconds** (`refresh_seconds`) when TWS connected and scanner enabled.
+9. Quotes persisted to SQLite before Strategy Runtime reads them.
+10. Risk Engine rejects strategies when chain snapshot is **stale, partial, unavailable, or fallback**.
+11. Scanner status: `idle | scanning | fresh | stale | partial | failed`.
+12. Missing Greeks/OI/volume must not crash the scanner; store what is available.
+13. MVP remains paper-only and TWS read-only; degrade safely when disconnected.
+
+### Scanner events
+
+- `OptionsChainMetadataRefreshed`
+- `OptionsChainScanStarted`
+- `OptionsChainExpiryBatchScanned`
+- `OptionsChainSnapshotCaptured`
+- `OptionsChainScanFailed`
+
+### API routes
+
+```text
+GET  /api/options-chain/{symbol}          # cached contracts + scanner status
+POST /api/options-chain/{symbol}/refresh  # enqueue background scan, return immediately
+```
+
+### Configuration (`backend/config.yaml`)
+
+```yaml
+options_chain:
+  enabled: true
+  symbols: ["QQQ"]
+  default_symbol: "QQQ"
+  min_dte: 14
+  max_dte: 42
+  max_expiries: 4
+  strikes_below: 8
+  strikes_above: 12
+  strike_interval: 5
+  max_contracts_per_scan: 200
+  allow_exceed_max_contracts: false
+  batch_delay_seconds: 5
+  refresh_seconds: 120
+  metadata_refresh_minutes: 20
+  max_spread_pct: 0.08
+  min_open_interest: 500
+  min_volume: 100
+```
+
 ## 19. Risk Page
 
 The Risk page should show exactly why trades are allowed or blocked.

@@ -44,6 +44,28 @@ class BrokerClient(Protocol):
 
     def option_chain(self, *, symbol: str, last_price: float) -> tuple[list[dict[str, Any]], ChainSource, str]: ...
 
+    def fetch_secdef_metadata(self, symbol: str) -> dict[str, Any] | None: ...
+
+    def fetch_expiry_quotes(
+        self,
+        *,
+        symbol: str,
+        expiry: str,
+        strikes: list[float],
+        exchange: str = "SMART",
+        trading_class: str | None = None,
+        multiplier: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
+    def fetch_exact_option_quotes(
+        self,
+        *,
+        symbol: str,
+        contracts: list[dict[str, Any]],
+        trading_class: str | None = None,
+        multiplier: int = 100,
+    ) -> list[dict[str, Any]]: ...
+
     def list_positions(self) -> list[dict[str, Any]]: ...
 
     def list_open_orders(self) -> list[dict[str, Any]]: ...

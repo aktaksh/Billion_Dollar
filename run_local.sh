@@ -9,6 +9,7 @@ PYENV_GLOBAL="${PYENV_GLOBAL:-${GIT_CODES_DIR}/pyenv_global}"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+RUNTIME_MODE="${RUNTIME_MODE:-production}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 BACKEND_DETACH="${BACKEND_DETACH:-1}"
 BACKEND_LOG="${BACKEND_LOG:-${BACKEND_DIR}/.backend.log}"
@@ -80,6 +81,7 @@ echo "Project root: ${ROOT_DIR}"
 echo "Python env:   ${PYENV_GLOBAL}"
 echo "Backend URL:  http://localhost:${BACKEND_PORT}"
 echo "Frontend URL: http://localhost:${FRONTEND_PORT}"
+echo "Runtime mode: ${RUNTIME_MODE} (production=live IBKR, testing=fixture)"
 echo
 
 kill_existing_port_process "Backend" "${BACKEND_PORT}"
@@ -90,6 +92,7 @@ require_free_port "Frontend" "${FRONTEND_PORT}"
 cd "${BACKEND_DIR}"
 export VIRTUAL_ENV="${PYENV_GLOBAL}"
 export PATH="${PYENV_GLOBAL}/bin:${PATH}"
+export BILLION_DOLLAR_RUNTIME_MODE="${RUNTIME_MODE}"
 
 if [[ -f "pyproject.toml" && -x "${PYENV_GLOBAL}/bin/poetry" ]]; then
   if [[ "${SKIP_INSTALL}" != "1" ]]; then

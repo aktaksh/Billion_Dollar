@@ -55,9 +55,29 @@ def build_symbol_features(
     beta_to_spy = max(0.6, min(1.8, 0.95 + (avg_abs_delta * 0.6)))
     beta_to_qqq = max(0.6, min(2.0, 1.0 + (avg_abs_delta * 0.7)))
 
+    event_risk_score = _safe_float(context_snapshot.get("event_risk_score"), 50.0)
+    vwap = _safe_float(context_snapshot.get("vwap"), (bid + ask + last) / 3.0 if bid > 0 and ask > 0 else last)
+    ema_20 = _safe_float(context_snapshot.get("ema_20"), last * (0.995 + (trend_score - 50.0) * 0.0002))
+    ema_20_slope = _safe_float(context_snapshot.get("ema_20_slope"), (trend_score - 50.0) * 0.02)
+    rsi_14 = _safe_float(context_snapshot.get("rsi_14"), max(30.0, min(70.0, 50.0 + (momentum_score - 50.0) * 0.4)))
+
+    if event_risk_score >= 60.0 or trend_score < 40.0:
+        regime = "risk_off"
+    elif trend_score >= 55.0 and event_risk_score < 50.0:
+        regime = "risk_on"
+    else:
+        regime = str(context_snapshot.get("regime") or "neutral").strip().lower()
+        if regime not in {"risk_on", "risk_off", "neutral"}:
+            regime = "neutral"
+
     return {
         "ticker": ticker.upper(),
         "last_price": round(last, 4),
+        "vwap": round(vwap, 4),
+        "ema_20": round(ema_20, 4),
+        "ema_20_slope": round(ema_20_slope, 4),
+        "rsi_14": round(rsi_14, 2),
+        "regime": regime,
         "trend_score": round(trend_score, 2),
         "momentum_score": round(momentum_score, 2),
         "relative_strength_score": round(relative_strength_score, 2),

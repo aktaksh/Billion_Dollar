@@ -521,6 +521,128 @@ Check:
 - Trusted IP includes `127.0.0.1`.
 - Backend was restarted after changes.
 
+### Options Chain shows idle / degraded / source none
+
+The scanner cache may be empty or stale after switching from mock to TWS. Restart the backend and enqueue a full scan:
+
+```bash
+lsof -tiTCP:8000 -sTCP:LISTEN | xargs kill -9
+cd backend && poetry run uvicorn app.main:app --reload --port 8000
+```
+
+In another terminal:
+
+```bash
+curl --max-time 10 -X POST "http://localhost:8000/api/ops/broker/connect?refresh_ingestion=false"
+curl --max-time 10 -X POST "http://localhost:8000/api/options-chain/QQQ/refresh"
+```
+
+Poll until `scanner_status` is `fresh`, `chain_source` is `broker`, and `contracts_usable` is greater than zero. Use `refresh_ingestion=false` on connect so ingestion does not compete with the chain scan.
+
+### Production vs testing runtime mode
+
+Use **Settings → Data runtime mode** (or API) to switch without editing `config.yaml`:
+
+| Mode | Use when |
+|------|----------|
+| **Production** | Live IBKR data during RTH — blocks testing fixtures and stale seed cache |
+| **Testing** | Off-hours UI dev — loads QQQ fixture, allows stale broker cache |
+
+```bash
+# Optional at startup via run_local.sh
+RUNTIME_MODE=production ./run_local.sh   # default
+RUNTIME_MODE=testing ./run_local.sh
+
+# Or via API
+curl -s http://localhost:8000/api/ops/runtime-mode
+curl -s -X POST http://localhost:8000/api/ops/runtime-mode?symbol=QQQ \
+  -H 'Content-Type: application/json' -d '{"mode":"production"}'
+```
+
+**Production workflow:** Settings → Production → Connect Broker → Refresh QQQ chain.
+
+### Testing outside market hours
+
+Outside regular US equity hours (9:30–16:00 ET), TWS often returns **empty option quotes**. The scanner preserves the last cached chain but marks it **stale**, which blocks Strategy Builder by default. Use the tiers below for full UI testing off-hours.
+
+#### Tier 1 — IB frozen / delayed frozen quotes (try first, no code)
+
+Set `tws_market_data_type` in `backend/config.yaml`:
+
+| Value | Meaning | Off-hours usefulness |
+|-------|---------|---------------------|
+| `1` | Live (default) | Empty options quotes |
+| `2` | Frozen (last close) | May return settlement bid/ask |
+| `3` | Delayed | Usually needs RTH |
+| `4` | Delayed frozen | May return last close |
+
+Steps:
+
+1. Set `tws_market_data_type: 2` (or `4`)
+2. Restart the backend
+3. Connect broker and refresh QQQ on the Options Chain page
+4. Confirm `chain_source=broker`, `contracts_usable > 0`
+
+If frozen quotes populate, Strategy Builder works without other changes. The smoke script also documents this (`backend/scripts/tws_smoke_test.py`).
+
+#### Tier 2 — Use a fresh cache without rescanning (narrow window)
+
+If you already have a **fresh** broker scan from RTH:
+
+1. Do **not** click Refresh scan off-hours (refresh triggers empty fetch → stale)
+2. Use the app within `runtime_max_age_seconds` (900s / 15 min) while `scanner_status` is still `fresh`
+3. Strategy Builder works with cached broker chain data
+
+Good for quick checks, not sustained off-hours dev.
+
+#### Tier 3 — Seed a broker snapshot (recommended for sustained UI testing)
+
+Inject a known-good broker scan into SQLite so the UI always has data without calling TWS:
+
+```bash
+cd backend
+poetry run python scripts/seed_qqq_chain_snapshot.py --fixture fixtures/qqq_broker_snapshot.json
+```
+
+Then open Options Chain and Strategy Builder — no TWS quotes needed.
+
+**After a backend restart** while TWS is disconnected, re-run the seed script (or enable `allow_stale_runtime_dev` in Tier 4). The options-chain scheduler's metadata job previously marked seeded cache as `failed` when the broker was down; that is now avoided when broker-backed contracts already exist.
+
+**Capture your own fixture once during RTH:**
+
+```bash
+curl -s http://localhost:8000/api/options-chain/QQQ > backend/fixtures/qqq_broker_snapshot.json
+```
+
+#### Tier 4 — Dev stale-cache runtime mode (after off-hours refresh)
+
+When you need Strategy Builder to work with a **stale but broker-backed** cache (after an off-hours refresh preserved last RTH data):
+
+1. Set in `backend/config.yaml`:
+
+```yaml
+options_chain:
+  allow_stale_runtime_dev: true   # local dev only; default false
+```
+
+2. Restart the backend
+3. Options Chain and Strategy Builder show a dev banner when the flag is active
+4. Stale broker cache with enough usable contracts is treated as allowed for runtime (mock and empty chains still blocked)
+
+Check dev flags: `GET /api/ops/dev-flags`
+
+#### Tier 5 — Automated tests (no market hours)
+
+```bash
+cd backend && poetry run pytest -q
+```
+
+Live TWS integration (RTH only):
+
+```bash
+TWS_INTEGRATION=1 poetry run pytest tests/test_broker_tws.py -q
+```
+
 ## Developer Commands
 
 Run backend tests:
@@ -563,3 +685,9 @@ Useful backend endpoints:
 Architecture reference:
 
 - `Billion-Dollar-Architecture-Reference.md`
+
+### For AI assistants
+
+- **Cursor (auto-loaded every chat):** `.cursor/rules/billion-dollar-project.mdc`
+- **Living flows for ChatGPT review:** `PSEUDOCODE.md` — paste into external review; update after major API or lifecycle changes
+- **Habit:** After milestones, ask Cursor to refresh `PSEUDOCODE.md` and the project rule if anything drifted

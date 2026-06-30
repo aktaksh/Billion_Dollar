@@ -328,8 +328,10 @@ export type StrategyCandidateOut = {
   gamma_score: number;
   liquidity_score: number;
   strategy_score: number;
-  risk_status: "allow" | "reject" | "override_required";
+  risk_status: "allow" | "reject" | "override_required" | "watch_only";
   rule_reasons: StrategyRuleReason[];
+  setup_status?: "confirmed" | "mixed" | "conflict" | null;
+  breakeven_distance_pct?: number | null;
 };
 
 export type StrategyBuilderCandidatesIn = {
@@ -398,10 +400,97 @@ export type StrategyRuntimeOut = {
   feature_snapshot_ref: string;
   option_chain_snapshot_ref: string;
   candidates: StrategyCandidateOut[];
+  top_recommendations?: StrategyCandidateOut[];
+  allowed_candidates?: StrategyCandidateOut[];
+  override_required_candidates?: StrategyCandidateOut[];
+  watch_only_candidates?: StrategyCandidateOut[];
+  rejected_candidates?: StrategyCandidateOut[];
+  setup_status?: "confirmed" | "mixed" | "conflict" | null;
+  setup_diagnostics?: Record<string, unknown>;
+  no_trade?: boolean;
+  chain_diagnostics?: Record<string, unknown>;
   as_of: string;
   data_status: DataStatus;
   runtime_allowed: boolean;
   runtime_block_reason?: string | null;
+  runtime_warning?: string | null;
+};
+
+export type ScannerStatus = "idle" | "scanning" | "fresh" | "stale" | "partial" | "failed";
+
+export type OptionsChainContractRow = {
+  expiry: string;
+  dte: number;
+  option_type: string;
+  strike: number;
+  bid: number;
+  ask: number;
+  last?: number | null;
+  mid: number;
+  spread_pct: number;
+  volume: number;
+  open_interest: number;
+  iv: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  status: string;
+  rejection_reason?: string | null;
+};
+
+export type OptionsChainSnapshotOut = {
+  as_of: string;
+  symbol: string;
+  data_status: DataStatus;
+  scanner_status: ScannerStatus;
+  chain_source: string;
+  last_scan_completed_at?: string | null;
+  expiries_selected: string[];
+  strike_low?: number | null;
+  strike_high?: number | null;
+  underlying_price?: number | null;
+  contracts_scanned: number;
+  contracts_rejected: number;
+  contracts_usable: number;
+  contracts_planned: number;
+  scan_notes: string[];
+  last_error?: string | null;
+  chain_origin?: string;
+  runtime_mode?: "production" | "testing";
+  is_production_valid_chain?: boolean;
+  allow_stale_runtime_dev?: boolean;
+  contracts: OptionsChainContractRow[];
+};
+
+export type RuntimeMode = "production" | "testing";
+
+export type RuntimeModeOut = {
+  as_of: string;
+  runtime_mode: RuntimeMode;
+  allow_stale_runtime_dev: boolean;
+  chain_origin: string;
+  is_production_valid_chain: boolean;
+  scanner_status?: string | null;
+  last_scan_completed_at?: string | null;
+  next_action?: string | null;
+  message?: string | null;
+};
+
+export type DevFlagsOut = {
+  as_of: string;
+  runtime_mode?: RuntimeMode;
+  allow_stale_runtime_dev: boolean;
+  chain_origin?: string;
+  is_production_valid_chain?: boolean;
+};
+
+export type OptionsChainRefreshOut = {
+  as_of: string;
+  symbol: string;
+  enqueued: boolean;
+  scanner_status: ScannerStatus;
+  message: string;
 };
 
 export type ReplayCandidateResult = {
