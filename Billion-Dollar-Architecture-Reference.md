@@ -936,7 +936,7 @@ The Options Chain page and Strategy Builder must read **cached** option-chain sn
 flowchart TD
   subgraph scheduler [APScheduler]
     MetaJob[metadata_refresh_15to30m]
-    QuoteJob[quote_refresh_120s_QQQ]
+    QuoteJob[quote_refresh_300s_QQQ]
   end
   subgraph gateway [TWS_API_Gateway]
     SecDef[reqSecDefOptParams]
@@ -951,6 +951,7 @@ flowchart TD
   subgraph api [FastAPI_cached_only]
     GET_chain["GET /api/options-chain/{symbol}"]
     POST_refresh["POST /api/options-chain/{symbol}/refresh"]
+    POST_clear["POST /api/options-chain/{symbol}/clear"]
   end
   subgraph consumers [Read_only_consumers]
     OptPage[Options_Chain_page]
@@ -976,16 +977,16 @@ flowchart TD
 4. Metadata cached in `options_chain_metadata`; refresh at startup and every `metadata_refresh_minutes` (15–30).
 5. Quote scan starts with **QQQ** (`options_chain.symbols` in `config.yaml`); other symbols keep legacy ingestion until enabled.
 6. **Bounded MVP subset only** — do not scan the full dense QQQ chain:
-   - DTE filter: **14–42 days** (2–6 weeks).
+   - DTE filter: **14–35 days**; strikes within **±10%** of spot (`strike_pct_range: 0.10`).
    - **Max 4 expiries** within that window (nearest first).
    - **8 listed $5 strikes below** spot and **12 listed $5 strikes above** spot (IBKR secdef only; exact $5 multiples).
    - Calls and puts; target **~100–200 contracts** per cycle.
    - **Hard cap 200** contracts per scan (`max_contracts_per_scan`); truncate expiries first, then widen interval — never blindly overrun.
-7. Batch by expiry; **one expiry at a time**; **5 seconds** between expiry batches (`batch_delay_seconds`); full cycle ~**45–60 seconds**.
-8. Quote refresh cycle ~**120 seconds** (`refresh_seconds`) when TWS connected and scanner enabled.
+7. Batch by expiry; **one expiry at a time** (single qualify+quote shot per expiry); **1 second** between expiry batches (`batch_delay_seconds`); full cycle ~**45–60 seconds**.
+8. Quote tick wait **2 seconds** (`quote_tick_wait_seconds`); delayed fallback kept. Stuck scan timeout **300s** (`scan_timeout_seconds`).
 9. Quotes persisted to SQLite before Strategy Runtime reads them.
-10. Risk Engine rejects strategies when chain snapshot is **stale, partial, unavailable, or fallback**.
-11. Scanner status: `idle | scanning | fresh | stale | partial | failed`.
+10. Risk Engine rejects strategies when chain snapshot is **stale beyond max age, partial without enough usable, unavailable, or fallback** — but allows cached broker data during background `scanning` or after `failed` when cache age ≤ max age.
+11. Scanner status: `idle | scanning | fresh | stale | partial | failed`; `failed` with cached contracts maps UI `data_status` to **degraded** (not disconnected).
 12. Missing Greeks/OI/volume must not crash the scanner; store what is available.
 13. MVP remains paper-only and TWS read-only; degrade safely when disconnected.
 
@@ -1001,7 +1002,8 @@ flowchart TD
 
 ```text
 GET  /api/options-chain/{symbol}          # cached contracts + scanner status
-POST /api/options-chain/{symbol}/refresh  # enqueue background scan, return immediately
+POST /api/options-chain/{symbol}/refresh  # enqueue background scan; recover failed/stuck without marking failed-on-refresh
+POST /api/options-chain/{symbol}/clear    # wipe contracts + reset scan status
 ```
 
 ### Configuration (`backend/config.yaml`)
@@ -1012,15 +1014,20 @@ options_chain:
   symbols: ["QQQ"]
   default_symbol: "QQQ"
   min_dte: 14
-  max_dte: 42
+  max_dte: 35
+  strike_pct_range: 0.10
   max_expiries: 4
   strikes_below: 8
   strikes_above: 12
   strike_interval: 5
   max_contracts_per_scan: 200
   allow_exceed_max_contracts: false
-  batch_delay_seconds: 5
-  refresh_seconds: 120
+  quote_batch_size: 40
+  quote_tick_wait_seconds: 2
+  batch_delay_seconds: 1
+  refresh_seconds: 300
+  runtime_max_age_seconds: 300
+  scan_timeout_seconds: 300
   metadata_refresh_minutes: 20
   max_spread_pct: 0.08
   min_open_interest: 500

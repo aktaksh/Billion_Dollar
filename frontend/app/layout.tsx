@@ -2,16 +2,14 @@ import type { Metadata } from "next";
 import Image from "next/image";
 
 import GlobalTabs from "@/components/GlobalTabs";
-import GlobalStatus from "@/components/GlobalStatus";
-import RuntimeModeBanner from "@/components/RuntimeModeBanner";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import ThemeToggle from "@/components/ThemeToggle";
 import "./globals.css";
 import "../styles/theme.css";
 
 export const metadata: Metadata = {
-  title: "Billion Dollar Dashboard",
-  description: "Broker-grade options decision workstation with risk-aware event tracing",
+  title: "Billion Dollar Spread Analyzer",
+  description: "QQQ and options spread analysis — research only",
 };
 
 const themeBootScript = `
@@ -48,7 +46,7 @@ export default function RootLayout({
               <div className="topbar-head">
                 <div>
                   <h1 className="brand">Billion Dollar</h1>
-                  <p className="muted-text">Broker-grade options decision workstation</p>
+                  <p className="muted-text">Options spread analysis — research only</p>
                 </div>
                 <div className="header-right">
                   <ThemeToggle />
@@ -58,10 +56,8 @@ export default function RootLayout({
                 </div>
               </div>
               <GlobalTabs />
-              <GlobalStatus />
             </header>
           </div>
-          <RuntimeModeBanner />
           <main>{children}</main>
         </ThemeProvider>
       </body>

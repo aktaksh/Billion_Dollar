@@ -234,15 +234,18 @@ GET  /api/ibkr/secdef/search?symbol=
 ```text
 CONFIG (backend/config.yaml → options_chain):
   symbols: [QQQ]
-  min_dte: 21, max_dte: 42, max_expiries: 4
+  min_dte: 14, max_dte: 35, strike_pct_range: 0.10, max_expiries: 4
   strikes_below: 8, strikes_above: 12
   strike_interval: 5                    # IBKR-listed $5 multiples only (700, 705 — not 706)
   max_contracts_per_scan: 200             # hard cap unless allow_exceed_max_contracts
-  batch_delay_seconds: 5                 # between expiry batches (~45-60s full cycle)
-  refresh_seconds: 120
-  runtime_max_age_seconds: 900           # 15 min; mark_stale_if_needed flips fresh→stale after this
+  quote_batch_size: 40
+  quote_tick_wait_seconds: 2
+  batch_delay_seconds: 1                 # 1s between expiry batches (~45-60s full cycle)
+  refresh_seconds: 300                   # auto-rescan interval when broker connected
+  runtime_max_age_seconds: 300           # 5 min; mark_stale_if_needed flips fresh→stale after this
+  scan_timeout_seconds: 300              # stuck scanning → failed
   metadata_refresh_minutes: 20
-  allow_stale_runtime_dev: false         # local dev only; Tier 4 off-hours (see README)
+  allow_stale_runtime_dev: false         # testing mode allows stale; production uses 5-min cache window
 
 TWS market data (config.yaml tws_market_data_type):
   1=live (RTH), 2=frozen, 3=delayed, 4=delayed frozen — use 1 during business hours
@@ -280,11 +283,14 @@ OFF-HOURS UI (no TWS quotes): seed_qqq_chain_snapshot.py + fixtures/qqq_broker_s
   OR allow_stale_runtime_dev: true (Strategy Builder only; does not bypass failed/empty)
 
 GET /api/options-chain/QQQ → cache only (never sync-fetch in handler)
-POST /api/options-chain/QQQ/refresh → enqueue APScheduler job, return immediately
+POST /api/options-chain/QQQ/refresh → recover stuck/failed, enqueue APScheduler job, return immediately
+POST /api/options-chain/QQQ/clear → wipe contracts + reset scan status; auto-enqueue scan if production + broker connected
 GET /api/ops/dev-flags → { allow_stale_runtime_dev }
 
 Strategy runtime for QQQ → read SQLite scanner cache only
-Frontend /options-chain → GET snapshot + POST refresh; poll while scanner_status=scanning
+  validate_chain_quality: allow scanning/failed when broker cache age ≤ runtime_max_age_seconds
+Frontend /options-chain → GET snapshot + POST refresh + POST clear; spinner + elapsed timer while scanning; poll every 3s
+Settings runtime mode → Production/Testing toggle only (no refresh button; Connect Broker separate)
 ```
 
 ---
@@ -329,7 +335,7 @@ IF ticker IN options_chain.symbols (scanner MVP, e.g. QQQ):
   quality_ok, quality_reason, quality_diag = validate_chain_quality(
     symbol, option_chain_rows, underlying_price,
     chain_source, scanner_status, data_status,
-    snapshot_age_seconds, max_runtime_age_seconds=900,
+    snapshot_age_seconds, max_runtime_age_seconds=300,
     contracts_usable, min_usable_contracts=10, max_nearest_strike_pct=0.10,
     allow_stale_runtime_dev=options_chain.allow_stale_runtime_dev
   )
@@ -346,14 +352,14 @@ IF ticker IN options_chain.symbols (scanner MVP, e.g. QQQ):
     no well-formed rows                    → option_chain_quality_failed_malformed
     no rows with bid>0 AND ask>0           → option_chain_quality_failed_no_quotes
     nearest quoted strike > 10% from spot  → option_chain_quality_failed_far_strikes
-    snapshot_age_seconds > 900             → option_chain_quality_failed_stale
+    snapshot_age_seconds > 300             → option_chain_quality_failed_stale
       # unless allow_stale_runtime_dev + stale broker cache with enough contracts
 
   # A2. Broker cache gate (15 min usable broker cache with warning)
   chain_ok, chain_reason, runtime_warning = chain_runtime_gate_status(
     scanner_status, data_status, chain_source,
     allow_mock_option_chain=FALSE,
-    last_scan_completed_at, contracts_usable, max_runtime_age_seconds=900,
+    last_scan_completed_at, contracts_usable, max_runtime_age_seconds=300,
     allow_stale_runtime_dev=options_chain.allow_stale_runtime_dev
   )
   # dev stale: runtime_warning = "Dev mode: using stale broker cache from last session"
@@ -403,7 +409,7 @@ puts  = legs WHERE option_type == put
 underlying = last_price
 
 DEFAULT cfg (from OptionsChainConfig + UI thresholds merge):
-  min_dte=21, max_spread_pct=0.08, min_open_interest=500,
+  min_dte=14, max_spread_pct=0.08, min_open_interest=500,
   min_option_volume=100, max_loss_per_trade_usd=500,
   min_reward_risk=0.60, min_probability_profit=0.40, high_iv_percentile=70
 
@@ -724,7 +730,7 @@ When reviewing this pseudocode against the codebase, verify:
    - scoring weights, risk rules, rank order (strategy_score, reward_risk, expected_value)
    - allow_stale_runtime_dev + effective_scanner_status for stale broker cache
    - underlying_price_source + feature divergence in chain_diagnostics
-   - §5b min_dte=21, scheduler skip on disconnect, metadata preserve when broker down
+   - §5b min_dte=14, refresh/rescan 300s, clear endpoint, scheduler skip on disconnect, metadata preserve when broker down
    - RTH live path vs off-hours seed/dev-stale (§5c K)
 
 **Prompt to paste with this file:**

@@ -33,10 +33,17 @@ Read → Save Decision → Replay → Paper → Review → Learn
 | Decision CRUD | `backend/app/services/decision_store.py`, `decisions_service.py` |
 | Paper + review | `backend/app/services/paper_decision_service.py`, `backend/app/engines/review_engine.py` |
 | TWS client | `backend/app/services/broker/tws_client.py` |
+| IBKR chain selection/filters | `backend/app/services/broker/option_chain_ibkr.py` |
 | Options chain scanner | `backend/app/services/options_chain_scanner.py`, `options_chain_planner.py` |
+| Chain quality gates | `backend/app/services/option_chain_quality.py` |
+| Scan status / stuck recovery | `backend/app/services/options_chain_store.py` (`recover_stuck_scan_if_needed`) |
+| Runtime mode (production/testing) | `backend/app/services/runtime_mode.py`, `chain_fixture_seed.py` |
+| Broker session / connect errors | `backend/app/services/broker_session.py`, `broker_endpoint.py` |
 | Config | `backend/app/config.py`, `backend/config.yaml` |
 | Frontend API | `frontend/lib/api.ts` |
 | Decision helpers | `frontend/lib/decisionHelpers.ts` |
+| Settings + runtime banner | `frontend/app/settings/page.tsx`, `frontend/components/RuntimeModeBanner.tsx` |
+| TWS smoke script | `backend/scripts/tws_smoke_test.py` |
 | Run locally | `run_local.sh` (backend detached via nohup on port 8000) |
 
 ## Docs hierarchy (do not duplicate)
@@ -44,6 +51,8 @@ Read → Save Decision → Replay → Paper → Review → Learn
 - **User guide:** `README.md`
 - **Architecture spec (canonical):** `Billion-Dollar-Architecture-Reference.md` — only architecture markdown; do not add parallel Architecture.md files
 - **Living flows for external review:** `PSEUDOCODE.md` — step-by-step runtime pseudocode for ChatGPT / human review
+
+**Note:** Architecture §18.1 and PSEUDOCODE §5b are kept in sync with scanner behavior below.
 
 ## Mandatory documentation sync (every implementation task)
 
@@ -119,19 +128,79 @@ Code pointers: `option_chain_quality.py`, `option_leg_filter.py`, `strategy_runt
 
 - TWS / IB Gateway via ib_insync; **no auto-connect on startup** — user must Connect Broker (Settings or `POST /api/ops/broker/connect`).
 - Ports: **7496/7497** (TWS live/paper), **4001/4002** (IB Gateway live/paper) — set `tws_port` in `backend/config.yaml`; restart backend after change.
+- Default config: `tws_port: 4001`, `tws_client_id: 2`, `tws_read_only: true`, `tws_market_data_type: 1` (live).
 - `data_status: live` = active TWS session; **seeded** recommendations (`"Seeded candidate"`) are not live IBKR rankings.
 - Live signals: `POST /api/signals/generate-from-ibkr` (thesis contains `"Auto-generated from IBKR"`).
 - IBKR market calls are **sync and can block** the API worker; use `refresh_ingestion=false` on connect if slow.
+- Graceful backend shutdown calls `broker_client.disconnect()` (`main.py` shutdown event).
+
+### Client ID and connection errors (operational)
+
+- **One client ID per process**: IB Gateway allows only one API session per `(host, port, clientId)`.
+- **Error 326** ("client id already in use") often surfaces in the app as **`TimeoutError`** — check Gateway logs, not just API settings.
+- **Zombie sessions**: crashed backend, killed smoke test, or `kill -9` without shutdown holds the client ID until Gateway restart or manual disconnect in Gateway API settings.
+- **Do not** run `tws_smoke_test.py` while the backend uses the same `tws_client_id`; stop backend first or use `TWS_CLIENT_ID=101` (or another free ID) for scripts.
+- Off-hours quotes: set `tws_market_data_type: 2` (frozen) in config, or rely on delayed fallback (type 3) in the option quote pipeline.
+
+## Runtime mode (production vs testing)
+
+- Persisted via `GET/POST /api/ops/runtime-mode` (`runtime_mode.py`); UI in Settings + `RuntimeModeBanner`.
+- **Production (live data required)** button sets runtime policy only — does **not** connect IBKR (use Connect Broker separately).
+- **Production**: "Live broker chain loaded" requires `chain_origin=broker_live`, `chain_source=broker`, `contracts_usable > 0`.
+- **Testing**: allows fixture seed (`chain_fixture_seed.py`); Strategy Builder may use stale/fixture cache.
+- `BILLION_DOLLAR_RUNTIME_MODE=production|testing` env overrides on startup.
+- Switching to Production clears `seeded_fixture` cache automatically; refresh scan lives on Options Chain page (not Settings).
+- Connect Broker in production enqueues a full QQQ scan when connected.
 
 ## QQQ options chain scanner
 
 - **QQQ only** for scanner MVP; **8 below + 12 above** listed $5 strikes × 4 expiries ≈ **160 contracts/cycle** (cap 200).
-- DTE **21**–42, max **4 expiries**, **8 strikes below + 12 above** spot on IBKR-listed **$5 multiples only**; batch one expiry at a time with **5s** delay.
-- `GET /api/options-chain/{symbol}` = cache only; `POST .../refresh` enqueues background scan (non-blocking).
+- DTE **14–35**, `strike_pct_range: 0.10` (±10% spot), max **4 expiries**, **$5 multiples only**; batch one expiry at a time with **1s** delay (`batch_delay_seconds`).
+- `GET /api/options-chain/{symbol}` = cache only; `POST .../refresh` enqueues background scan (non-blocking); `POST .../clear` wipes contracts + resets status.
 - Frontend `/options-chain` reads cached API only — never sync ingestion for QQQ.
 - Strategy runtime for scanner symbols reads SQLite cache, not live broker in request path.
-- Strategy Builder algorithm: `PSEUDOCODE.md` **§5c** (gates, leg filter, spreads, dedupe, partition); code in `option_chain_quality.py`, `option_leg_filter.py`, `strategy_builder_engine.py`, `main.py`.
-- Metadata via `reqSecDefOptParams` only; no full dense chain scan.
+- Strategy Builder gates: `option_chain_quality.py`, `option_leg_filter.py`, `strategy_builder_engine.py`, `main.py`; algorithm detail in `PSEUDOCODE.md` **§5c**.
+
+### IBKR discovery pipeline (`tws_client.py` + `option_chain_ibkr.py`)
+
+1. Resolve QQQ STK (SMART, NASDAQ) → `conId`.
+2. `reqSecDefOptParams` — store **all** callbacks; select chain: `tradingClass=QQQ`, `multiplier=100`, **SMART then AMEX**.
+3. Filter expiries (DTE 14–35) and strikes (±10% spot) before quote requests.
+4. Build exact OPT contracts; **batch** `qualifyContracts` (SMART → AMEX fallback per batch).
+5. Quotes: configured live market data type first, **delayed (type 3) fallback**; rows include `data_type: LIVE|DELAYED`.
+6. **No broad** `reqContractDetails` for full chain — only batch qualify for filtered contracts.
+7. Known-good smoke anchors: QQQ `20260717` 710C and 740C via `fetch_exact_option_quotes`.
+
+### Scan timing and config (`config.yaml`)
+
+- Full QQQ scan ~**45–60s** (1s between expiries, 2s tick wait per batch).
+- Stuck-scan watchdog: **300s** (`scan_timeout_seconds` / `recover_stuck_scan_if_needed`); marks `failed` + `scan timed out; refresh to retry`.
+- Key options: `quote_batch_size: 40`, `quote_tick_wait_seconds: 2`, `batch_delay_seconds: 1`, `runtime_max_age_seconds: 300`, `refresh_seconds: 300`.
+- Options Chain UI: spinner + elapsed timer while `scanning`; `POST .../clear` auto-enqueues scan when broker connected in production.
+- Planner (`options_chain_planner.py`): ±10% band after $5-multiple filter, then below/above count trimming.
+
+### Scanner status semantics (troubleshooting)
+
+| `scanner_status` | UI `data_status` | Notes |
+|------------------|------------------|-------|
+| `scanning` | `degraded` | Normal during refresh; `contracts_scanned` updates only at end |
+| `fresh` | `live` | Successful scan |
+| `failed` | `degraded` if contracts cached, else `disconnected` | Last scan error in `last_error`; cached broker data usable within 5 min |
+| `partial` | `degraded` | Some batches failed |
+
+- **`Source: broker`** can persist after a **failed** scan (last good `chain_source` not cleared).
+- **`scan timed out`**: status stuck `scanning` > 300s → auto-`failed` on GET chain or new scan start.
+- **Recovery**: restart backend → Connect Broker (clears timeout error, enqueues scan) → Refresh scan once, wait ~2 min for `fresh`.
+- **Refresh during scan**: no longer marks `failed`; resets lock and re-enqueues (or no-op if scan started &lt; 30s ago).
+- **Refresh on `failed`**: clears error, sets `idle`, enqueues new scan.
+- **Strategy Builder during scan/failed**: allowed when broker cache age ≤ 5 min and `contracts_usable ≥ 10` (`option_chain_quality.py` + `chain_runtime_gate_status`).
+
+## Strategy Builder — fetch vs gate errors
+
+- **`Failed to fetch`** (browser) = API unreachable (backend down, wrong `NEXT_PUBLIC_API_BASE_URL`, CORS localhost vs 127.0.0.1) — **not** a strategy gate message.
+- API **200** with block = `runtime_block_reason` (e.g. `option_chain_quality_failed_scanner_status` while scanner is still `scanning`).
+- In **production**, Strategy Builder works on broker cache up to **5 minutes** old even while a background rescan runs (`scanning`) or last scan `failed`.
+- `POST /api/strategy-builder/runtime` reads cached chain + features; does not fetch live IBKR chain in request path for QQQ.
 
 ## Decision hub
 
@@ -154,4 +223,12 @@ Key APIs: `POST /api/decisions/save`, `GET /api/decisions`, `POST /api/paper/run
 cd backend && poetry run pytest
 cd frontend && npm run build
 ./run_local.sh
+```
+
+TWS smoke test (requires IB Gateway; bootstraps `sys.path` like `seed_qqq_chain_snapshot.py`):
+
+```bash
+cd backend && python scripts/tws_smoke_test.py --quick --skip-strategy
+# Do not run concurrently with backend on the same tws_client_id
+# Alternative: TWS_CLIENT_ID=101 python scripts/tws_smoke_test.py --quick --skip-strategy
 ```

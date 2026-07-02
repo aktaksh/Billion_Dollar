@@ -1,38 +1,29 @@
-import type {
-  ActiveUniverse,
-  BlotterRow,
-  DashboardSummary,
-  EnrichedRecommendation,
-  ExplainFeedItem,
-  EventSummary,
-  PositionsResponse,
-  ReconcileMismatch,
-  Recommendation,
-  ReplayRunOut,
-  RiskStatus,
-  StrategyBuilderCandidatesIn,
-  StrategyBuilderCandidatesOut,
-  StrategyRuntimeOut,
-  OptionsChainSnapshotOut,
-  OptionsChainRefreshOut,
-  DevFlagsOut,
-  RuntimeModeOut,
-  PaperTradeRunOut,
-  StrategyHealthRow,
-  TradeCard,
-  TradeDecision,
-  TradeReviewItem,
-  UniverseUploadResponse,
-  UniverseVersionRow,
-  WatchlistOpportunity,
-} from "@/types";
+import type { QqqSpreadAnalysis, QqqSpreadRunOut, QqqSpreadRunStatusOut } from "@/types/qqqSpreadAnalyzer";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+async function readApiError(res: Response, path: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: string | Array<{ msg?: string }> };
+    if (typeof body.detail === "string" && body.detail.trim()) {
+      return body.detail;
+    }
+    if (Array.isArray(body.detail) && body.detail.length > 0) {
+      const first = body.detail[0];
+      if (first && typeof first.msg === "string") {
+        return first.msg;
+      }
+    }
+  } catch {
+    // ignore JSON parse errors
+  }
+  return `Request failed: ${res.status} ${path}`;
+}
 
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!res.ok) {
-    throw new Error(`Request failed: ${res.status} ${path}`);
+    throw new Error(await readApiError(res, path));
   }
   return (await res.json()) as T;
 }
@@ -40,249 +31,59 @@ async function fetchJson<T>(path: string): Promise<T> {
 async function fetchJsonWithInit<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init);
   if (!res.ok) {
-    throw new Error(`Request failed: ${res.status} ${path}`);
+    throw new Error(await readApiError(res, path));
   }
   return (await res.json()) as T;
 }
 
-export function getRecommendations() {
-  return fetchJson<Recommendation[]>("/api/recommendations");
-}
-
-export function getRiskStatus() {
-  return fetchJson<RiskStatus>("/api/risk-status");
-}
-
-export function getEvents() {
-  return fetchJson<EventSummary[]>("/api/events");
-}
-
-export function getExplainFeed(params?: {
-  ticker?: string;
-  limit?: number;
-  correlation_id?: string;
-  minutes?: number;
-  scope?: string;
-  decision_id?: string;
-}) {
-  const query = new URLSearchParams();
-  if (params?.ticker) query.set("ticker", params.ticker);
-  if (params?.limit) query.set("limit", String(params.limit));
-  if (params?.correlation_id) query.set("correlation_id", params.correlation_id);
-  if (params?.minutes) query.set("minutes", String(params.minutes));
-  if (params?.scope) query.set("scope", params.scope);
-  if (params?.decision_id) query.set("decision_id", params.decision_id);
-  const suffix = query.toString() ? `?${query.toString()}` : "";
-  return fetchJson<ExplainFeedItem[]>(`/api/explain-feed${suffix}`);
-}
-
-export function getStrategyHealth() {
-  return fetchJson<StrategyHealthRow[]>("/api/strategy-health");
-}
-
-export function getTradeReviewQueue() {
-  return fetchJson<TradeReviewItem[]>("/api/trade-review-queue");
-}
-
-export function getUniverseActive() {
-  return fetchJson<ActiveUniverse>("/api/universe/active");
-}
-
-export function getUniverseVersions() {
-  return fetchJson<UniverseVersionRow[]>("/api/universe/versions");
-}
-
-export function activateUniverse(universe_version_id: string, universe_id: string, activated_by: string) {
-  return fetchJsonWithInit<{ event_id: string; activated_at: string; universe_version_id: string; universe_id: string }>(
-    "/api/universe/activate",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ universe_version_id, universe_id, activated_by }),
-    },
-  );
-}
-
-export async function uploadUniverse(file: File) {
-  const formData = new FormData();
-  formData.append("file", file);
-  return fetchJsonWithInit<UniverseUploadResponse>("/api/universe/upload", {
-    method: "POST",
-    body: formData,
+export async function getQqqSpreadAnalysis(symbol = "QQQ"): Promise<QqqSpreadAnalysis | null> {
+  const sym = symbol.trim().toUpperCase();
+  const res = await fetch(`${API_BASE}/api/qqq-spread-analyzer/latest?symbol=${encodeURIComponent(sym)}`, {
+    cache: "no-store",
   });
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status} /api/qqq-spread-analyzer/latest`);
+  }
+  return (await res.json()) as QqqSpreadAnalysis;
 }
 
-export function getWatchlist() {
-  return fetchJson<WatchlistOpportunity[]>("/api/watchlist");
-}
-
-export function getTradeCard(ticker: string) {
-  return fetchJson<TradeCard>(`/api/tickers/${encodeURIComponent(ticker)}/trade-card`);
-}
-
-export function getPositions() {
-  return fetchJson<PositionsResponse>("/api/positions");
-}
-
-export function getBlotter() {
-  return fetchJson<BlotterRow[]>("/api/blotter");
-}
-
-export function getReconcileMismatches() {
-  return fetchJson<ReconcileMismatch[]>("/api/reconcile/mismatches");
-}
-
-export function getShellStatus() {
-  return fetchJson<import("@/types").ShellStatus>("/api/ops/shell-status");
-}
-
-export function getBrokerStatus() {
-  return fetchJson<import("@/types").BrokerStatus>("/api/ops/broker/status");
-}
-
-export function connectBroker(refreshIngestion = true) {
-  return fetchJsonWithInit<import("@/types").BrokerConnectResult>(
-    `/api/ops/broker/connect?refresh_ingestion=${refreshIngestion ? "true" : "false"}`,
-    { method: "POST" },
-  );
-}
-
-export function runIngestionOnce(payload: { tickers: string[]; include_news?: boolean }) {
-  return fetchJsonWithInit<{ run_id: string; processed: number; as_of: string; data_status: string }>(
-    "/api/ops/ingestion/run-once",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
-export function getStrategyBuilderCandidates(payload: StrategyBuilderCandidatesIn) {
-  return fetchJsonWithInit<StrategyBuilderCandidatesOut>("/api/strategy-builder/candidates", {
+export function runQqqSpreadAnalysis(symbol = "QQQ", noCache = false) {
+  return fetchJsonWithInit<QqqSpreadRunOut>("/api/qqq-spread-analyzer/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ symbol: symbol.trim().toUpperCase(), no_cache: noCache }),
   });
 }
 
-export function runStrategyRuntime(payload: {
-  ticker: string;
-  direction: "bullish" | "bearish";
-  reconciliation_mismatch_active?: boolean;
-  thresholds?: Record<string, number>;
-}) {
-  return fetchJsonWithInit<StrategyRuntimeOut>("/api/strategy-builder/runtime", {
+export function getQqqSpreadRunStatus(jobId: string) {
+  return fetchJson<QqqSpreadRunStatusOut>(`/api/qqq-spread-analyzer/run/${encodeURIComponent(jobId)}`);
+}
+
+export async function getOptionsSpreadStrategyAnalysis(symbol: string): Promise<QqqSpreadAnalysis | null> {
+  const sym = symbol.trim().toUpperCase();
+  const res = await fetch(`${API_BASE}/api/options-spread-strategy/latest?symbol=${encodeURIComponent(sym)}`, {
+    cache: "no-store",
+  });
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(await readApiError(res, `/api/options-spread-strategy/latest`));
+  }
+  return (await res.json()) as QqqSpreadAnalysis;
+}
+
+export function runOptionsSpreadStrategyAnalysis(symbol: string, noCache = false) {
+  return fetchJsonWithInit<QqqSpreadRunOut>("/api/options-spread-strategy/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ symbol: symbol.trim().toUpperCase(), no_cache: noCache }),
   });
 }
 
-export function runReplay(payload: { ticker: string; direction: "bullish" | "bearish"; scenarios?: number[] }) {
-  return fetchJsonWithInit<ReplayRunOut>("/api/replay/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+export function getOptionsSpreadStrategyRunStatus(jobId: string) {
+  return fetchJson<QqqSpreadRunStatusOut>(`/api/options-spread-strategy/run/${encodeURIComponent(jobId)}`);
 }
-
-export function runPaperTrade(payload: {
-  mode?: "decision" | "quick";
-  decision_id?: string;
-  ticker?: string;
-  direction?: "bullish" | "bearish";
-  scenario_return?: number;
-}) {
-  return fetchJsonWithInit<PaperTradeRunOut>("/api/paper/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "decision", scenario_return: 0.015, ...payload }),
-  });
-}
-
-export function getDashboardSummary() {
-  return fetchJson<DashboardSummary>("/api/dashboard/summary");
-}
-
-export function getDashboardRecommendations() {
-  return fetchJson<EnrichedRecommendation[]>("/api/dashboard/recommendations");
-}
-
-export function saveDecision(payload: Record<string, unknown>) {
-  return fetchJsonWithInit<TradeDecision>("/api/decisions/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function getDecisions(params?: { symbol?: string; review_status?: string }) {
-  const q = new URLSearchParams();
-  if (params?.symbol) q.set("symbol", params.symbol);
-  if (params?.review_status) q.set("review_status", params.review_status);
-  const suffix = q.toString() ? `?${q.toString()}` : "";
-  return fetchJson<TradeDecision[]>(`/api/decisions${suffix}`);
-}
-
-export function getDecision(decisionId: string) {
-  return fetchJson<TradeDecision>(`/api/decisions/${encodeURIComponent(decisionId)}`);
-}
-
-export function patchDecision(decisionId: string, payload: Record<string, unknown>) {
-  return fetchJsonWithInit<TradeDecision>(`/api/decisions/${encodeURIComponent(decisionId)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function getTradeReview() {
-  return fetchJson<TradeReviewItem[]>("/api/trade-review");
-}
-
-export function classifyReview(decisionId: string) {
-  return fetchJsonWithInit<{ decision_id: string; final_outcome: string; review_status: string }>(
-    `/api/trade-review/${encodeURIComponent(decisionId)}/classify`,
-    { method: "POST" },
-  );
-}
-
-export function completeReview(decisionId: string, payload: { final_outcome: string; lesson: string }) {
-  return fetchJsonWithInit<TradeDecision>(`/api/trade-review/${encodeURIComponent(decisionId)}/complete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function getOptionsChain(symbol: string) {
-  return fetchJson<OptionsChainSnapshotOut>(`/api/options-chain/${encodeURIComponent(symbol.trim().toUpperCase())}`);
-}
-
-export function refreshOptionsChain(symbol: string) {
-  return fetchJsonWithInit<OptionsChainRefreshOut>(
-    `/api/options-chain/${encodeURIComponent(symbol.trim().toUpperCase())}/refresh`,
-    { method: "POST" },
-  );
-}
-
-export function getDevFlags() {
-  return fetchJson<DevFlagsOut>("/api/ops/dev-flags");
-}
-
-export function getRuntimeMode(symbol = "QQQ") {
-  return fetchJson<RuntimeModeOut>(`/api/ops/runtime-mode?symbol=${encodeURIComponent(symbol.trim().toUpperCase())}`);
-}
-
-export function setRuntimeMode(mode: "production" | "testing", symbol = "QQQ") {
-  return fetchJsonWithInit<RuntimeModeOut>(
-    `/api/ops/runtime-mode?symbol=${encodeURIComponent(symbol.trim().toUpperCase())}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
-    },
-  );
-}
-

@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import dataclass
 from datetime import timedelta, timezone
 from datetime import datetime as dt
 
-from app.config import OptionsChainConfig
 from app.services.options_chain_planner import (
     _is_five_dollar_multiple,
     _listed_five_dollar_strikes,
     plan_scan_scope,
 )
+
+
+@dataclass
+class _PlannerCfg:
+    min_dte: int = 14
+    max_dte: int = 35
+    strike_interval: float = 5.0
+    max_contracts_per_scan: int = 200
+    allow_exceed_max_contracts: bool = False
+    strikes_below: int = 8
+    strikes_above: int = 12
+    max_expiries: int = 4
+    strike_pct_range: float = 0.10
 
 
 def _expiry(days: int) -> str:
@@ -21,9 +34,9 @@ def _listed_grid(low: int, high: int) -> list[float]:
 
 
 class OptionsChainPlannerTests(unittest.TestCase):
-    def _cfg(self, **overrides: object) -> OptionsChainConfig:
-        base = OptionsChainConfig()
-        return base.model_copy(update=overrides)
+    def _cfg(self, **overrides: object) -> _PlannerCfg:
+        base = _PlannerCfg()
+        return base.__class__(**{**base.__dict__, **overrides})
 
     def test_listed_five_dollar_multiples_only(self) -> None:
         raw = [700.0, 701.0, 705.0, 706.0, 727.0, 730.0]

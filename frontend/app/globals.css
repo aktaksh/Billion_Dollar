@@ -683,3 +683,28 @@ td {
   }
 }
 
+.scan-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 0.9rem;
+  color: var(--text-muted, #64748b);
+}
+
+.scan-progress-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border, #cbd5e1);
+  border-top-color: var(--accent, #2563eb);
+  border-radius: 50%;
+  animation: scan-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes scan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+

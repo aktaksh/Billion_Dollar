@@ -12,8 +12,13 @@ FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 RUNTIME_MODE="${RUNTIME_MODE:-production}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 BACKEND_DETACH="${BACKEND_DETACH:-1}"
-BACKEND_LOG="${BACKEND_LOG:-${BACKEND_DIR}/.backend.log}"
-BACKEND_PID_FILE="${BACKEND_PID_FILE:-${BACKEND_DIR}/.backend.pid}"
+LOGS_DIR="${LOGS_DIR:-${ROOT_DIR}/logs}"
+BACKEND_LOG="${BACKEND_LOG:-${LOGS_DIR}/backend.log}"
+FRONTEND_LOG="${FRONTEND_LOG:-${LOGS_DIR}/frontend.log}"
+BACKEND_PID_FILE="${BACKEND_PID_FILE:-${LOGS_DIR}/backend.pid}"
+APP_NDJSON_LOG="${APP_NDJSON_LOG:-${LOGS_DIR}/app.ndjson}"
+
+mkdir -p "${LOGS_DIR}"
 
 require_free_port() {
   local label="$1"
@@ -82,6 +87,10 @@ echo "Python env:   ${PYENV_GLOBAL}"
 echo "Backend URL:  http://localhost:${BACKEND_PORT}"
 echo "Frontend URL: http://localhost:${FRONTEND_PORT}"
 echo "Runtime mode: ${RUNTIME_MODE} (production=live IBKR, testing=fixture)"
+echo "App logs:     ${LOGS_DIR}/"
+echo "  backend:    ${BACKEND_LOG}"
+echo "  frontend:   ${FRONTEND_LOG}"
+echo "  structured: ${APP_NDJSON_LOG}"
 echo
 
 kill_existing_port_process "Backend" "${BACKEND_PORT}"
@@ -92,7 +101,6 @@ require_free_port "Frontend" "${FRONTEND_PORT}"
 cd "${BACKEND_DIR}"
 export VIRTUAL_ENV="${PYENV_GLOBAL}"
 export PATH="${PYENV_GLOBAL}/bin:${PATH}"
-export BILLION_DOLLAR_RUNTIME_MODE="${RUNTIME_MODE}"
 
 if [[ -f "pyproject.toml" && -x "${PYENV_GLOBAL}/bin/poetry" ]]; then
   if [[ "${SKIP_INSTALL}" != "1" ]]; then
@@ -145,8 +153,8 @@ else
   echo "[frontend] SKIP_INSTALL=1, skipping npm install."
 fi
 
-echo "[frontend] Starting dashboard..."
-npm run dev -- --port "${FRONTEND_PORT}" &
+echo "[frontend] Starting dashboard (log: ${FRONTEND_LOG})..."
+npm run dev -- --port "${FRONTEND_PORT}" 2>&1 | tee "${FRONTEND_LOG}" &
 FRONTEND_PID=$!
 
 cleanup() {
