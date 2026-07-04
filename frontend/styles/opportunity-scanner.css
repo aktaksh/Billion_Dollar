@@ -1,0 +1,227 @@
+.os-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.os-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.85rem;
+}
+
+.os-disclaimer {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border-left: 3px solid var(--accent);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.os-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.55rem;
+}
+
+.os-card {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.os-card-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.os-card-value {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 0.2rem;
+}
+
+.os-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: flex-end;
+}
+
+.os-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.os-filters select,
+.os-filters input[type="number"] {
+  min-width: 120px;
+}
+
+.os-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.os-badge-bullish {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.os-badge-bearish {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.os-badge-neutral {
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+}
+
+.os-score-high {
+  color: #4ade80;
+}
+
+.os-score-mid {
+  color: #facc15;
+}
+
+.os-score-low {
+  color: #f87171;
+}
+
+.os-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 40;
+}
+
+.os-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(420px, 100vw);
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--panel-bg, #111827);
+  border-left: 1px solid var(--border);
+  z-index: 50;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.os-drawer h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.os-drawer-section {
+  font-size: 0.85rem;
+}
+
+.os-drawer-section h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.os-drawer ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.os-table-compact td,
+.os-table-compact th {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.os-table-compact td.reason-cell {
+  white-space: normal;
+  max-width: 180px;
+}
+
+.os-row-clickable {
+  cursor: pointer;
+}
+
+.os-row-clickable:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Market Open Refresh timestamps bar */
+.os-refresh-timestamps {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--border);
+  margin-top: 0.4rem;
+}
+
+.os-refresh-timestamps span {
+  white-space: nowrap;
+}
+
+.os-refresh-duration {
+  opacity: 0.6;
+}
+
+/* Upstream warnings */
+.os-upstream-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+
+/* Technical Confidence badges */
+.os-tech-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.os-tech-fresh {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.os-tech-stale {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.os-tech-not-evaluated {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
+/* Market Open Refresh button emphasis */
+.os-mor-btn {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.os-mor-helper {
+  opacity: 0.7;
+}

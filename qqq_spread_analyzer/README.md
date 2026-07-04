@@ -19,7 +19,7 @@ Indicators (EMA, RSI, MACD, ATR, Bollinger) are computed with **pandas/numpy onl
 |---------|-------------|
 | Host | `127.0.0.1` |
 | Port | `4001` (IB Gateway paper/live) |
-| Client ID | `12` (avoid `2` — used by Billion Dollar backend) |
+| Client ID | `12` (analyzer — separate from paper-trading sync client ID **13** in `backend/config.yaml`) |
 | Read-only | **Yes** |
 
 Copy env file:
@@ -107,11 +107,15 @@ poetry run pytest
 
 ## Relationship to Billion Dollar app
 
-| Component | Shared? |
-|-----------|---------|
-| IB Gateway connection | Same host/port pattern; **different clientId** |
-| Option secdef parsing | Imports `option_chain_ibkr` from backend |
-| FastAPI / Next.js UI | Not used |
-| Strategy Builder runtime | Separate research CLI |
+This CLI is the analysis engine behind the **QQQ Spread Analyzer** and **Options Spread Strategy** web pages. See the parent [README.md](../README.md) for the full app.
 
-Run the analyzer while Billion Dollar is up — use clientId `12` in `.env` so you don't steal clientId `2`.
+| Component | Relationship |
+|-----------|--------------|
+| Web UI | FastAPI spawns this CLI via `POST /api/qqq-spread-analyzer/run`; frontend reads `latest_analysis_{SYMBOL}.json` |
+| QQQ page embeds | Market Regime Phase 1 (`frontend/lib/marketRegime.ts`) + Trade Decision Engine on top of analysis JSON |
+| IB client ID | Analyzer uses **12** (`qqq_spread_analyzer/.env`); Paper Trading Lab IBKR sync uses **13** (`backend/config.yaml`) |
+| Option secdef parsing | Imports `option_chain_ibkr` from `backend/app/services/broker/` |
+| DuckDB cache | Local to this package (`data/analyzer.duckdb`) |
+| News Intelligence | Separate CLI module in `backend/news_intelligence/` — not invoked by analyzer runs |
+
+Start the full app from repo root: `./run_local.sh`

@@ -48,47 +48,13 @@ export function useSpreadAnalysisPage(symbol: string, api: SpreadAnalysisApi) {
   const [lastFetchedAt, setLastFetchedAt] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const baselineTsRef = useRef<string | null>(null);
+  const autorunTriggered = useRef(false);
 
   const load = useCallback(async () => {
     if (!sym) return;
-    // #region agent log
-    fetch("http://127.0.0.1:7577/ingest/6544d4bf-d7b7-42e2-bdeb-9c98609756e6", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "68ab8c" },
-      body: JSON.stringify({
-        sessionId: "68ab8c",
-        hypothesisId: "A",
-        location: "useSpreadAnalysisPage.ts:load:start",
-        message: "load started",
-        data: { sym, busyBefore: busy, runBusy },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     setBusy(true);
     try {
       const result = await api.getAnalysis(sym);
-      // #region agent log
-      fetch("http://127.0.0.1:7577/ingest/6544d4bf-d7b7-42e2-bdeb-9c98609756e6", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "68ab8c" },
-        body: JSON.stringify({
-          sessionId: "68ab8c",
-          hypothesisId: "A,D",
-          location: "useSpreadAnalysisPage.ts:load:result",
-          message: "load API returned",
-          data: {
-            sym,
-            hasResult: Boolean(result),
-            resultSymbol: result?.symbol ?? null,
-            resultTimestamp: result?.timestamp ?? null,
-            symbolMatch: result ? result.symbol.trim().toUpperCase() === sym : false,
-            ageMin: result ? analysisAgeMinutes(result.timestamp) : null,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (!result || result.symbol.trim().toUpperCase() !== sym) {
         setData(null);
         setEmpty(true);
@@ -100,40 +66,11 @@ export function useSpreadAnalysisPage(symbol: string, api: SpreadAnalysisApi) {
       }
       setLastFetchedAt(new Date().toISOString());
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Failed to load analysis";
-      // #region agent log
-      fetch("http://127.0.0.1:7577/ingest/6544d4bf-d7b7-42e2-bdeb-9c98609756e6", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "68ab8c" },
-        body: JSON.stringify({
-          sessionId: "68ab8c",
-          hypothesisId: "C",
-          location: "useSpreadAnalysisPage.ts:load:error",
-          message: "load failed",
-          data: { sym, errMsg },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      setError(errMsg);
+      setError(err instanceof Error ? err.message : "Failed to load analysis");
     } finally {
       setBusy(false);
-      // #region agent log
-      fetch("http://127.0.0.1:7577/ingest/6544d4bf-d7b7-42e2-bdeb-9c98609756e6", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "68ab8c" },
-        body: JSON.stringify({
-          sessionId: "68ab8c",
-          hypothesisId: "B",
-          location: "useSpreadAnalysisPage.ts:load:finally",
-          message: "load finished",
-          data: { sym },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
     }
-  }, [api, sym, busy, runBusy]);
+  }, [api, sym]);
 
   const pollJob = useCallback(
     async (jobId: string) => {
@@ -206,6 +143,24 @@ export function useSpreadAnalysisPage(symbol: string, api: SpreadAnalysisApi) {
     const timer = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(timer);
   }, [load, sym]);
+
+  // Auto-run when navigated with ?autorun=true (e.g. from Opportunity Scanner "Analyze Live")
+  useEffect(() => {
+    if (autorunTriggered.current) return;
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("autorun") !== "true") return;
+    autorunTriggered.current = true;
+    // Strip autorun param from URL
+    params.delete("autorun");
+    const newUrl = `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`;
+    window.history.replaceState({}, "", newUrl);
+    // Wait for initial load to complete, then trigger run if data is stale or empty
+    const timer = setTimeout(() => {
+      void handleRun();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [handleRun]);
 
   useEffect(() => {
     if (!runBusy || !activeJobId) return undefined;

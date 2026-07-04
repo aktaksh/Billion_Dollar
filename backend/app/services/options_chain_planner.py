@@ -83,6 +83,36 @@ def _select_expiries_in_dte_window(
     return [expiry for _, expiry in candidates[:max_expiries]]
 
 
+def _select_expiries_multi_bucket(
+    all_expiries: list[str],
+    *,
+    buckets: list[tuple[int, int]],
+    max_per_bucket: int = 2,
+    max_expiries: int = 8,
+) -> list[str]:
+    """Select expiries across multiple DTE buckets, picking up to max_per_bucket from each."""
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    for lo, hi in buckets:
+        bucket_candidates: list[tuple[int, str]] = []
+        for expiry in all_expiries:
+            if expiry in seen:
+                continue
+            dte = _parse_expiry_dte(expiry)
+            if dte is None or dte < lo or dte > hi:
+                continue
+            bucket_candidates.append((dte, expiry))
+        bucket_candidates.sort(key=lambda item: item[0])
+        for _, exp in bucket_candidates[:max_per_bucket]:
+            if len(selected) >= max_expiries:
+                break
+            selected.append(exp)
+            seen.add(exp)
+
+    return selected
+
+
 def plan_scan_scope(
     *,
     spot: float,
@@ -97,12 +127,28 @@ def plan_scan_scope(
     below_count = int(getattr(cfg, "strikes_below", 8))
     above_count = int(getattr(cfg, "strikes_above", 12))
 
-    expiries = _select_expiries_in_dte_window(
-        all_expiries,
-        min_dte=int(cfg.min_dte),
-        max_dte=int(cfg.max_dte),
-        max_expiries=int(cfg.max_expiries),
-    )
+    expiries: list[str]
+    dte_buckets = getattr(cfg, "dte_buckets", None)
+    if dte_buckets:
+        aggressive = getattr(cfg, "aggressive_mode", False)
+        buckets = list(dte_buckets)
+        if aggressive:
+            agg_bucket = getattr(cfg, "dte_bucket_aggressive", (7, 14))
+            buckets.insert(0, agg_bucket)
+        max_per_bucket = int(getattr(cfg, "max_expiries_per_bucket", 2))
+        expiries = _select_expiries_multi_bucket(
+            all_expiries,
+            buckets=buckets,
+            max_per_bucket=max_per_bucket,
+            max_expiries=int(cfg.max_expiries),
+        )
+    else:
+        expiries = _select_expiries_in_dte_window(
+            all_expiries,
+            min_dte=int(cfg.min_dte),
+            max_dte=int(cfg.max_dte),
+            max_expiries=int(cfg.max_expiries),
+        )
 
     listed = _listed_five_dollar_strikes(all_strikes)
     pct_range = float(getattr(cfg, "strike_pct_range", 0.0) or 0.0)

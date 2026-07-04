@@ -169,6 +169,7 @@ def report_to_dict(
     diagnostics: dict[str, Any] | None = None,
     liquid_options: list[OptionQuote] | None = None,
     raw_options: list[OptionQuote] | None = None,
+    expiry_search: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spot = report.underlying_price
     score = report.score
@@ -228,6 +229,7 @@ def report_to_dict(
         "risk_notes": list(report.risk_notes or []),
         "positions_count": report.positions_count,
         "open_orders_count": report.open_orders_count,
+        "expiry_search": expiry_search or {},
         "backtest": {
             "available": False,
             "message": "Backtest module not yet populated.",
@@ -243,6 +245,7 @@ def write_latest_analysis(
     diagnostics: dict[str, Any] | None = None,
     liquid_options: list[OptionQuote] | None = None,
     raw_options: list[OptionQuote] | None = None,
+    expiry_search: dict[str, Any] | None = None,
     path: Path,
 ) -> dict[str, Any]:
     payload = report_to_dict(
@@ -250,6 +253,7 @@ def write_latest_analysis(
         diagnostics=diagnostics,
         liquid_options=liquid_options,
         raw_options=raw_options,
+        expiry_search=expiry_search,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

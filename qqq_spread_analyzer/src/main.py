@@ -18,6 +18,7 @@ from src.backtest import run_bar_backtest
 from src.config import get_settings
 from src.data_fetcher import fetch_underlying_price, load_or_fetch_bars
 from src.export import write_latest_analysis
+from src.expiry_spread_orchestrator import ExpirySpreadOrchestrator
 from src.ib_client import ib_session
 from src.indicators import compute_daily_indicators, compute_intraday_indicators
 from src.levels import compute_levels
@@ -94,7 +95,25 @@ def run_analyze(symbol: str, *, use_cache: bool = True, timeframe: str | None = 
             )
             progress(f"Option quotes: {len(raw_quotes)} raw")
             liquid = filter_liquid_options(raw_quotes, settings)
-            spreads = build_spread_candidates(liquid, score.action, settings=settings)
+
+            progress("Running expiry search engine…")
+            orchestrator = ExpirySpreadOrchestrator(settings)
+            expiry_spread_result = orchestrator.run(
+                raw_quotes,
+                liquid,
+                underlying,
+                score.action,
+                confidence=score.confidence,
+                volatility="Medium",
+                earnings_date=None,
+            )
+            spreads = expiry_spread_result.final_candidates
+            expiry_search_export = orchestrator.export_dict(expiry_spread_result)
+
+            if expiry_spread_result.force_wait:
+                progress(f"[yellow]Expiry search: WAIT — {expiry_spread_result.wait_reason}[/yellow]")
+            else:
+                progress(f"Expiry search: {len(spreads)} candidates across {expiry_spread_result.expiry_search.expiries_scanned} expiries")
 
             positions = ib.positions()
             orders = ib.openOrders()
@@ -141,6 +160,7 @@ def run_analyze(symbol: str, *, use_cache: bool = True, timeframe: str | None = 
                 diagnostics=diagnostics,
                 liquid_options=liquid,
                 raw_options=raw_quotes,
+                expiry_search=expiry_search_export,
                 path=settings.latest_analysis_path(symbol),
             )
 

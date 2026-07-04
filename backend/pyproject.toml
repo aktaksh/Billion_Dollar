@@ -16,6 +16,7 @@ python-multipart = "0.0.12"
 ib-insync = "^0.9.86"
 apscheduler = "^3.10.4"
 pyyaml = "^6.0.2"
+ibapi = "^9.81.1.post1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

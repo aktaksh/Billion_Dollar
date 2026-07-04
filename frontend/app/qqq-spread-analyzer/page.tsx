@@ -5,14 +5,19 @@ import { useMemo } from "react";
 import BacktestPanel from "@/components/qqq-spread/BacktestPanel";
 import DailyIndicatorsPanel from "@/components/qqq-spread/DailyIndicatorsPanel";
 import DiagnosticsPanel from "@/components/qqq-spread/DiagnosticsPanel";
+import ExpiryRankingPanel from "@/components/qqq-spread/ExpiryRankingPanel";
 import IntradayPanel from "@/components/qqq-spread/IntradayPanel";
 import KeyLevelsPanel from "@/components/qqq-spread/KeyLevelsPanel";
-import MarketBiasPanel from "@/components/qqq-spread/MarketBiasPanel";
+import MarketRegimeSummary from "@/components/qqq-spread/MarketRegimeSummary";
+import NewsIntelligenceCard from "@/components/qqq-spread/news/NewsIntelligenceCard";
+import TradeDecisionEngine from "@/components/qqq-spread/TradeDecisionEngine";
 import OptionChainPanel from "@/components/qqq-spread/OptionChainPanel";
 import RiskNotesPanel from "@/components/qqq-spread/RiskNotesPanel";
 import SpreadCandidatesTable from "@/components/qqq-spread/SpreadCandidatesTable";
 import SummaryBar from "@/components/qqq-spread/SummaryBar";
 import { useSpreadAnalysisPage } from "@/hooks/useSpreadAnalysisPage";
+import { computeMarketRegime } from "@/lib/marketRegime";
+import { pickSuggestedSpread } from "@/lib/tradeDecision";
 import { getQqqSpreadAnalysis, getQqqSpreadRunStatus, runQqqSpreadAnalysis } from "@/lib/api";
 import "@/styles/qqq-spread-analyzer.css";
 
@@ -41,6 +46,16 @@ export default function QqqSpreadAnalyzerPage() {
     load,
     handleRun,
   } = useSpreadAnalysisPage(SYMBOL, api);
+
+  const regime = useMemo(() => (data ? computeMarketRegime(data) : null), [data]);
+
+  const displayedSpread = useMemo(() => {
+    if (!data) return null;
+    const filter = regime?.strategyFilter;
+    const decision =
+      filter === "Bull Call Spread" || filter === "Bear Put Spread" ? filter : "WAIT";
+    return pickSuggestedSpread(data, decision);
+  }, [data, regime]);
 
   return (
     <div className="container page-stack qqq-page">
@@ -83,13 +98,26 @@ export default function QqqSpreadAnalyzerPage() {
             dataIsStale={dataIsStale}
             dataAgeMin={dataAgeMin}
           />
-          <MarketBiasPanel data={data} />
+          <TradeDecisionEngine data={data} onRefresh={() => void load()} busy={busy || runBusy} />
+        </>
+      )}
+
+      <NewsIntelligenceCard symbol={SYMBOL} />
+
+      {data && (
+        <>
+          <MarketRegimeSummary data={data} />
           <div className="qqq-grid-2">
             <DailyIndicatorsPanel data={data} />
             <IntradayPanel data={data} />
           </div>
-          <KeyLevelsPanel supportLevels={data.support_levels} resistanceLevels={data.resistance_levels} />
-          <SpreadCandidatesTable data={data} />
+          <KeyLevelsPanel
+            supportLevels={data.support_levels}
+            resistanceLevels={data.resistance_levels}
+            optionExpiry={displayedSpread?.expiry}
+          />
+          <ExpiryRankingPanel expirySearch={(data as unknown as Record<string, unknown>).expiry_search as Parameters<typeof ExpiryRankingPanel>[0]["expirySearch"]} />
+          <SpreadCandidatesTable data={data} strategyFilter={regime?.strategyFilter} />
           <RiskNotesPanel data={data} />
           <BacktestPanel data={data} />
           <OptionChainPanel data={data} />

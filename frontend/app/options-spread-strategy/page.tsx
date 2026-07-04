@@ -1,17 +1,21 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import BacktestPanel from "@/components/qqq-spread/BacktestPanel";
 import DailyIndicatorsPanel from "@/components/qqq-spread/DailyIndicatorsPanel";
 import DiagnosticsPanel from "@/components/qqq-spread/DiagnosticsPanel";
+import ExpiryRankingPanel from "@/components/qqq-spread/ExpiryRankingPanel";
 import IntradayPanel from "@/components/qqq-spread/IntradayPanel";
 import KeyLevelsPanel from "@/components/qqq-spread/KeyLevelsPanel";
+import { pickSuggestedSpread } from "@/lib/tradeDecision";
 import MarketBiasPanel from "@/components/qqq-spread/MarketBiasPanel";
 import OptionChainPanel from "@/components/qqq-spread/OptionChainPanel";
 import RiskNotesPanel from "@/components/qqq-spread/RiskNotesPanel";
 import SpreadCandidatesTable from "@/components/qqq-spread/SpreadCandidatesTable";
 import SummaryBar from "@/components/qqq-spread/SummaryBar";
+import SymbolSelector, { persistSymbol, readPersistedSymbol } from "@/components/qqq-spread/SymbolSelector";
 import { useSpreadAnalysisPage } from "@/hooks/useSpreadAnalysisPage";
 import {
   getOptionsSpreadStrategyAnalysis,
@@ -20,8 +24,37 @@ import {
 } from "@/lib/api";
 import "@/styles/qqq-spread-analyzer.css";
 
-export default function OptionsSpreadStrategyPage() {
-  const [symbol, setSymbol] = useState("SPY");
+function OptionsSpreadStrategyContent() {
+  const searchParams = useSearchParams();
+  const urlSymbol = searchParams.get("symbol")?.trim().toUpperCase();
+
+  // Initialize with URL param or fallback "SPY" for SSR consistency.
+  // localStorage is read in useEffect to avoid hydration mismatch.
+  const [symbol, setSymbol] = useState(urlSymbol || "SPY");
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    if (hydrated) return;
+    setHydrated(true);
+    // On first client mount, restore persisted symbol if no URL param
+    if (!urlSymbol) {
+      const persisted = readPersistedSymbol();
+      if (persisted && persisted !== symbol) {
+        setSymbol(persisted);
+      }
+    } else {
+      persistSymbol(urlSymbol);
+    }
+  }, [hydrated, urlSymbol, symbol]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const fromUrl = searchParams.get("symbol")?.trim().toUpperCase();
+    if (fromUrl && fromUrl !== symbol) {
+      setSymbol(fromUrl);
+      persistSymbol(fromUrl);
+    }
+  }, [searchParams, symbol, hydrated]);
 
   const api = useMemo(
     () => ({
@@ -47,6 +80,18 @@ export default function OptionsSpreadStrategyPage() {
     handleRun,
   } = useSpreadAnalysisPage(symbol, api);
 
+  // Persist symbol whenever analysis loads successfully
+  useEffect(() => {
+    if (data && symbol) {
+      persistSymbol(symbol);
+    }
+  }, [data, symbol]);
+
+  const displayedSpread = useMemo(
+    () => (data ? pickSuggestedSpread(data) : null),
+    [data],
+  );
+
   return (
     <div className="container page-stack qqq-page">
       <div className="panel-header">
@@ -60,14 +105,23 @@ export default function OptionsSpreadStrategyPage() {
           style={{ marginTop: "0.5rem" }}
           onSubmit={(event) => {
             event.preventDefault();
+            persistSymbol(symbol);
+            const url = new URL(window.location.href);
+            url.searchParams.set("symbol", symbol);
+            window.history.replaceState({}, "", url.toString());
             void load();
           }}
         >
-          <input
-            className="feed-input"
+          <SymbolSelector
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            placeholder="Symbol"
+            onChange={setSymbol}
+            onSubmit={() => {
+              persistSymbol(symbol);
+              const url = new URL(window.location.href);
+              url.searchParams.set("symbol", symbol);
+              window.history.replaceState({}, "", url.toString());
+              void load();
+            }}
             disabled={runBusy}
           />
         </form>
@@ -110,7 +164,12 @@ export default function OptionsSpreadStrategyPage() {
             <DailyIndicatorsPanel data={data} />
             <IntradayPanel data={data} />
           </div>
-          <KeyLevelsPanel supportLevels={data.support_levels} resistanceLevels={data.resistance_levels} />
+          <KeyLevelsPanel
+            supportLevels={data.support_levels}
+            resistanceLevels={data.resistance_levels}
+            optionExpiry={displayedSpread?.expiry}
+          />
+          <ExpiryRankingPanel expirySearch={(data as unknown as Record<string, unknown>).expiry_search as Parameters<typeof ExpiryRankingPanel>[0]["expirySearch"]} />
           <SpreadCandidatesTable data={data} />
           <RiskNotesPanel data={data} />
           <BacktestPanel data={data} />
@@ -119,5 +178,13 @@ export default function OptionsSpreadStrategyPage() {
         </>
       )}
     </div>
+  );
+}
+
+export default function OptionsSpreadStrategyPage() {
+  return (
+    <Suspense fallback={<div className="container page-stack qqq-page"><p className="qqq-empty">Loading…</p></div>}>
+      <OptionsSpreadStrategyContent />
+    </Suspense>
   );
 }

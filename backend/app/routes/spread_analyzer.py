@@ -141,6 +141,13 @@ def _run_analyzer_subprocess(
             cwd=project_dir,
             result=result,
         )
+        if result.returncode == 0 and mode == "analyze":
+            try:
+                from app.routes.paper_trading import get_service
+
+                get_service().mark_to_market_for_symbol(sym)
+            except Exception:
+                pass
         finished = datetime.now(UTC)
         with lock:
             if job_id not in jobs:

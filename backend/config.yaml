@@ -1,1 +1,11 @@
 qqq_analyzer_poetry: /opt/homebrew/bin/poetry
+database_url: sqlite:///./paper_trading.db
+ibkr_gateway_base_url: https://localhost:5000/v1/api
+ibkr_gateway_verify_tls: false
+ibkr_auto_sync_seconds: 0
+ibkr_broker_backend: auto
+tws_host: 127.0.0.1
+tws_port: 4001
+tws_client_id: 13
+tws_read_only: true
+tws_market_data_type: 1

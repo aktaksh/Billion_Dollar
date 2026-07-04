@@ -1,5 +1,5 @@
 ---
-description: Billion Dollar decision-review workstation — scope, lifecycle, key paths, constraints
+description: Billion Dollar options alpha research platform — scope, lifecycle, key paths, constraints
 alwaysApply: true
 ---
 
@@ -7,228 +7,136 @@ alwaysApply: true
 
 ## Purpose
 
-Billion Dollar is an **options decision-review workstation** (FastAPI + Next.js). It helps review trade ideas, save decisions, run **simulated paper trades**, and judge outcomes over time.
+Billion Dollar is a **research-only options alpha research platform** (FastAPI + Next.js). It analyzes QQQ and any symbol via IBKR, classifies market regime, ranks trade decisions, and tracks paper trades.
 
-It is **not** a live auto-trading bot. `execution_mode` is `paper_only`; TWS is **read-only** in MVP.
+It is **not** a live auto-trading bot. `execution_mode` is `paper_only`; IB connections are **read-only**.
 
 ## Mandatory user workflow
 
 ```text
-Read → Save Decision → Replay → Paper → Review → Learn
+Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper Trade
 ```
 
-- Normal paper trades **require** a saved `decision_id`.
-- **Quick Paper Test** is the only exception (developer mode).
-- If risk says reject, do not paper trade.
-- If broker disconnected or reconcile blocking, pause new entries.
+1. **Market Open Refresh** — lightweight: news + regime + ranking (no IBKR)
+2. **Opportunity Scanner** — review ranked symbols, pick one
+3. **Analyze Live** — auto-navigates to Options Spread Strategy, runs full IBKR analysis
+4. **Trade Decision Engine** — final recommendation (WAIT / Bull Call / Bear Put)
+5. **Paper Trade** — save if acceptable
+
+## Module responsibility boundaries
+
+| Module | Does | Does NOT |
+|--------|------|----------|
+| Market Intelligence | News, catalysts, earnings, sentiment | Recommend trades |
+| Market Regime | Regime score, volatility, breadth | Recommend trades |
+| Opportunity Scanner | Rank symbols, direction candidates | Download option chains, build spreads |
+| Options Spread Strategy | Full live analysis + TDE | Rank multiple symbols |
+| Trade Decision Engine | Final recommendation | Run without fresh analysis |
 
 ## Repo map (start here)
 
 | Area | Path |
 |------|------|
-| API routes | `backend/app/main.py` |
-| Pydantic models | `backend/app/models.py` |
-| DB + `trade_decisions` | `backend/app/db.py` |
-| Event log views | `backend/app/services/event_store.py` |
-| Decision CRUD | `backend/app/services/decision_store.py`, `decisions_service.py` |
-| Paper + review | `backend/app/services/paper_decision_service.py`, `backend/app/engines/review_engine.py` |
-| TWS client | `backend/app/services/broker/tws_client.py` |
-| IBKR chain selection/filters | `backend/app/services/broker/option_chain_ibkr.py` |
-| Options chain scanner | `backend/app/services/options_chain_scanner.py`, `options_chain_planner.py` |
-| Chain quality gates | `backend/app/services/option_chain_quality.py` |
-| Scan status / stuck recovery | `backend/app/services/options_chain_store.py` (`recover_stuck_scan_if_needed`) |
-| Runtime mode (production/testing) | `backend/app/services/runtime_mode.py`, `chain_fixture_seed.py` |
-| Broker session / connect errors | `backend/app/services/broker_session.py`, `broker_endpoint.py` |
-| Config | `backend/app/config.py`, `backend/config.yaml` |
-| Frontend API | `frontend/lib/api.ts` |
-| Decision helpers | `frontend/lib/decisionHelpers.ts` |
-| Settings + runtime banner | `frontend/app/settings/page.tsx`, `frontend/components/RuntimeModeBanner.tsx` |
-| TWS smoke script | `backend/scripts/tws_smoke_test.py` |
-| Run locally | `run_local.sh` (backend detached via nohup on port 8000) |
+| API entry | `backend/app/main.py` |
+| DB schema | `backend/app/db.py` |
+| Config (stale thresholds) | `backend/app/config.py`, `backend/config.yaml` |
+| Global Refresh | `backend/app/routes/global_refresh.py`, `backend/app/services/global_refresh_service.py` |
+| Spread analyzer API | `backend/app/routes/spread_analyzer.py` |
+| Opportunity Scanner | `backend/app/services/opportunity_scanner/` |
+| Market regime API | `backend/app/routes/market_regime.py` |
+| Trade decision API | `backend/app/routes/trade_decision.py` |
+| Paper trading API | `backend/app/routes/paper_trading.py` |
+| Market regime Phase 2 | `backend/app/services/market_regime/` |
+| Trade decision backend | `backend/app/services/trade_decision/` |
+| Paper trades + IBKR sync | `backend/app/services/paper_trade_service.py`, `ibkr/` |
+| Market Intelligence | `backend/app/services/market_intelligence/` |
+| News Intelligence pipeline | `backend/news_intelligence/` |
+| IBKR News provider | `backend/app/services/news_intelligence/` |
+| AI Report | `backend/app/services/ai_report_service.py` |
+| Expiry + Spread Engine | `qqq_spread_analyzer/src/expiry_search_engine.py`, `spread_search_engine.py`, `expiry_spread_orchestrator.py` |
+| Analyzer CLI | `qqq_spread_analyzer/src/` |
+| Frontend hooks | `frontend/hooks/useSpreadAnalysisPage.ts` (autorun support) |
+| Frontend API clients | `frontend/lib/globalRefreshApi.ts`, `api.ts`, `opportunityScannerApi.ts` |
+| Phase 1 regime | `frontend/lib/marketRegime.ts` |
+| Trade Decision Engine | `frontend/lib/tradeDecision.ts` |
+| Pages | `frontend/app/qqq-spread-analyzer/`, `options-spread-strategy/`, `paper-trading-lab/`, `market-regime/`, `market-intelligence/`, `opportunity-scanner/` |
+| Run locally | `run_local.sh` |
 
 ## Docs hierarchy (do not duplicate)
 
 - **User guide:** `README.md`
-- **Architecture spec (canonical):** `Billion-Dollar-Architecture-Reference.md` — only architecture markdown; do not add parallel Architecture.md files
-- **Living flows for external review:** `PSEUDOCODE.md` — step-by-step runtime pseudocode for ChatGPT / human review
-
-**Note:** Architecture §18.1 and PSEUDOCODE §5b are kept in sync with scanner behavior below.
+- **Architecture spec (canonical):** `Billion-Dollar-Architecture-Reference.md`
+- **Logic flows + algorithms:** `PSEUDOCODE.md`
 
 ## Mandatory documentation sync (every implementation task)
 
 **Do not mark a task complete until docs are updated when the change affects behavior, APIs, config, UI, or data flow.**
 
-Update **both** files when applicable — architecture for *what/why/structure*, pseudocode for *step-by-step flow*.
-
-### When to update `Billion-Dollar-Architecture-Reference.md`
-
-Update the relevant section(s) after changes to:
-
-| Change type | Typical sections |
-|-------------|------------------|
-| API routes / response models | §11 API Response Contract, §8.x service section |
-| Strategy Builder algorithm / UI | §8.5 Strategy Runtime Engine, §16 Strategy Builder Page |
-| Options chain scanner | §18 Options Chain Page, §18.1 QQQ Scanner Design |
-| Broker / TWS / data trust | §3 Broker Integration, §7 Data Trust Policy |
-| Risk / reconcile / paper / replay | §8.6–8.9, §19–25 |
-| Frontend pages / shell | §12–14 UI map, specific page section (§15–27) |
-| Config defaults (`config.yaml`) | §18.1 scanner params, §8.x affected service |
-| Event model / storage | §10 Event-Driven Storage Model |
-
-Rules:
-
-- Edit the **existing** section in place; do not create duplicate architecture files.
-- Keep architecture **descriptive** (components, contracts, policies) — not line-by-line algorithm (that belongs in PSEUDOCODE).
-- If a section is materially wrong after your change, fix it in the same PR/task.
-
-### When to update `PSEUDOCODE.md`
-
-Update after changes to:
-
-| Change type | Typical sections |
-|-------------|------------------|
-| Decision lifecycle / paper / review flow | §3 lifecycle hooks, §5 flows |
-| New/changed API routes | §5 API pseudocode blocks |
-| Strategy Builder (any part) | **§5c** (primary), §3 hook, §10 checklist item 9 |
-| Options chain scanner | §5b |
-| Broker connect / ingestion / TWS path | §6 |
-| Frontend page behavior | §7 page map + relevant flow |
-| Known gaps fixed or new gaps | §9 |
-| Review checklist | §10 |
-
-Rules:
-
-- **§5c** is the Strategy Builder source of truth for algorithm steps (gates, leg filter, spreads, dedupe, payoff, POP, partition, UI).
-- Do not leave §5c describing old behavior (e.g. `calls[:40]`, `max(0.01, debit)`, mock-allowed QQQ).
-- After major milestones, remind the user they can paste `PSEUDOCODE.md` into ChatGPT for review.
-
 ### Documentation completion checklist (agent)
-
-Before reporting a task done, confirm:
 
 ```text
 [ ] Code + tests pass (if applicable)
-[ ] Billion-Dollar-Architecture-Reference.md updated OR N/A (explain why N/A)
-[ ] PSEUDOCODE.md updated OR N/A (explain why N/A)
+[ ] Billion-Dollar-Architecture-Reference.md updated OR N/A
+[ ] PSEUDOCODE.md updated OR N/A
+[ ] README.md updated if user-facing behavior changed
 [ ] No new duplicate architecture/pseudocode files created
 ```
 
-**N/A is valid only for** pure refactors with zero behavior/API/UI/config change, or typo-only edits.
-
-### Quick mapping: Strategy Builder changes
-
-| Doc | Sections |
-|-----|----------|
-| Architecture | §8.5, §16, §11 (`StrategyRuntimeOut` fields) |
-| PSEUDOCODE | §3, §5c, §9, §10 item 9 |
-
-Code pointers: `option_chain_quality.py`, `option_leg_filter.py`, `strategy_runtime_engine.py`, `strategy_builder_engine.py`, `probability_engine.py`, `main.py`, `models.py`, `frontend/app/strategy-builder/page.tsx`.
-
 ## Broker and data
 
-- TWS / IB Gateway via ib_insync; **no auto-connect on startup** — user must Connect Broker (Settings or `POST /api/ops/broker/connect`).
-- Ports: **7496/7497** (TWS live/paper), **4001/4002** (IB Gateway live/paper) — set `tws_port` in `backend/config.yaml`; restart backend after change.
-- Default config: `tws_port: 4001`, `tws_client_id: 2`, `tws_read_only: true`, `tws_market_data_type: 1` (live).
-- `data_status: live` = active TWS session; **seeded** recommendations (`"Seeded candidate"`) are not live IBKR rankings.
-- Live signals: `POST /api/signals/generate-from-ibkr` (thesis contains `"Auto-generated from IBKR"`).
-- IBKR market calls are **sync and can block** the API worker; use `refresh_ingestion=false` on connect if slow.
-- Graceful backend shutdown calls `broker_client.disconnect()` (`main.py` shutdown event).
+### Client IDs (do not conflate)
 
-### Client ID and connection errors (operational)
+| Use | Client ID | Config |
+|-----|-----------|--------|
+| Spread analyzer CLI + API subprocess | **12** | `qqq_spread_analyzer/.env` → `IB_CLIENT_ID=12` |
+| Paper Trading Lab IBKR sync | **13** | `backend/config.yaml` → `tws_client_id: 13` |
 
-- **One client ID per process**: IB Gateway allows only one API session per `(host, port, clientId)`.
-- **Error 326** ("client id already in use") often surfaces in the app as **`TimeoutError`** — check Gateway logs, not just API settings.
-- **Zombie sessions**: crashed backend, killed smoke test, or `kill -9` without shutdown holds the client ID until Gateway restart or manual disconnect in Gateway API settings.
-- **Do not** run `tws_smoke_test.py` while the backend uses the same `tws_client_id`; stop backend first or use `TWS_CLIENT_ID=101` (or another free ID) for scripts.
-- Off-hours quotes: set `tws_market_data_type: 2` (frozen) in config, or rely on delayed fallback (type 3) in the option quote pipeline.
+- **One client ID per IB session** — error 326 if two processes share the same ID.
+- Analyzer runs are triggered manually via UI; no auto-connect on backend startup for analysis.
+- IB Gateway port **4001** (default in both configs).
 
-## Runtime mode (production vs testing)
+### Analysis data flow
 
-- Persisted via `GET/POST /api/ops/runtime-mode` (`runtime_mode.py`); UI in Settings + `RuntimeModeBanner`.
-- **Production (live data required)** button sets runtime policy only — does **not** connect IBKR (use Connect Broker separately).
-- **Production**: "Live broker chain loaded" requires `chain_origin=broker_live`, `chain_source=broker`, `contracts_usable > 0`.
-- **Testing**: allows fixture seed (`chain_fixture_seed.py`); Strategy Builder may use stale/fixture cache.
-- `BILLION_DOLLAR_RUNTIME_MODE=production|testing` env overrides on startup.
-- Switching to Production clears `seeded_fixture` cache automatically; refresh scan lives on Options Chain page (not Settings).
-- Connect Broker in production enqueues a full QQQ scan when connected.
+```text
+POST /api/qqq-spread-analyzer/run
+  → subprocess: poetry run python -m src.main --symbol QQQ --mode analyze
+  → writes latest_analysis_QQQ.json
+  → GET /api/qqq-spread-analyzer/latest serves JSON to frontend
+```
 
-## QQQ options chain scanner
+## Trade Decision Engine
 
-- **QQQ only** for scanner MVP; **8 below + 12 above** listed $5 strikes × 4 expiries ≈ **160 contracts/cycle** (cap 200).
-- DTE **14–35**, `strike_pct_range: 0.10` (±10% spot), max **4 expiries**, **$5 multiples only**; batch one expiry at a time with **1s** delay (`batch_delay_seconds`).
-- `GET /api/options-chain/{symbol}` = cache only; `POST .../refresh` enqueues background scan (non-blocking); `POST .../clear` wipes contracts + resets status.
-- Frontend `/options-chain` reads cached API only — never sync ingestion for QQQ.
-- Strategy runtime for scanner symbols reads SQLite cache, not live broker in request path.
-- Strategy Builder gates: `option_chain_quality.py`, `option_leg_filter.py`, `strategy_builder_engine.py`, `main.py`; algorithm detail in `PSEUDOCODE.md` **§5c**.
+- **Scoring is client-authoritative** (`frontend/lib/tradeDecision.ts`).
+- Backend `POST /api/trade-decision/record` persists audit rows only.
+- Auto-records when analysis timestamp changes on QQQ page.
+- Nine weighted components; see `PSEUDOCODE.md` §6.
 
-### IBKR discovery pipeline (`tws_client.py` + `option_chain_ibkr.py`)
+## News Intelligence
 
-1. Resolve QQQ STK (SMART, NASDAQ) → `conId`.
-2. `reqSecDefOptParams` — store **all** callbacks; select chain: `tradingClass=QQQ`, `multiplier=100`, **SMART then AMEX**.
-3. Filter expiries (DTE 14–35) and strikes (±10% spot) before quote requests.
-4. Build exact OPT contracts; **batch** `qualifyContracts` (SMART → AMEX fallback per batch).
-5. Quotes: configured live market data type first, **delayed (type 3) fallback**; rows include `data_type: LIVE|DELAYED`.
-6. **No broad** `reqContractDetails` for full chain — only batch qualify for filtered contracts.
-7. Known-good smoke anchors: QQQ `20260717` 710C and 740C via `fetch_exact_option_quotes`.
-
-### Scan timing and config (`config.yaml`)
-
-- Full QQQ scan ~**45–60s** (1s between expiries, 2s tick wait per batch).
-- Stuck-scan watchdog: **300s** (`scan_timeout_seconds` / `recover_stuck_scan_if_needed`); marks `failed` + `scan timed out; refresh to retry`.
-- Key options: `quote_batch_size: 40`, `quote_tick_wait_seconds: 2`, `batch_delay_seconds: 1`, `runtime_max_age_seconds: 300`, `refresh_seconds: 300`.
-- Options Chain UI: spinner + elapsed timer while `scanning`; `POST .../clear` auto-enqueues scan when broker connected in production.
-- Planner (`options_chain_planner.py`): ±10% band after $5-multiple filter, then below/above count trimming.
-
-### Scanner status semantics (troubleshooting)
-
-| `scanner_status` | UI `data_status` | Notes |
-|------------------|------------------|-------|
-| `scanning` | `degraded` | Normal during refresh; `contracts_scanned` updates only at end |
-| `fresh` | `live` | Successful scan |
-| `failed` | `degraded` if contracts cached, else `disconnected` | Last scan error in `last_error`; cached broker data usable within 5 min |
-| `partial` | `degraded` | Some batches failed |
-
-- **`Source: broker`** can persist after a **failed** scan (last good `chain_source` not cleared).
-- **`scan timed out`**: status stuck `scanning` > 300s → auto-`failed` on GET chain or new scan start.
-- **Recovery**: restart backend → Connect Broker (clears timeout error, enqueues scan) → Refresh scan once, wait ~2 min for `fresh`.
-- **Refresh during scan**: no longer marks `failed`; resets lock and re-enqueues (or no-op if scan started &lt; 30s ago).
-- **Refresh on `failed`**: clears error, sets `idle`, enqueues new scan.
-- **Strategy Builder during scan/failed**: allowed when broker cache age ≤ 5 min and `contracts_usable ≥ 10` (`option_chain_quality.py` + `chain_runtime_gate_status`).
-
-## Strategy Builder — fetch vs gate errors
-
-- **`Failed to fetch`** (browser) = API unreachable (backend down, wrong `NEXT_PUBLIC_API_BASE_URL`, CORS localhost vs 127.0.0.1) — **not** a strategy gate message.
-- API **200** with block = `runtime_block_reason` (e.g. `option_chain_quality_failed_scanner_status` while scanner is still `scanning`).
-- In **production**, Strategy Builder works on broker cache up to **5 minutes** old even while a background rescan runs (`scanning`) or last scan `failed`.
-- `POST /api/strategy-builder/runtime` reads cached chain + features; does not fetch live IBKR chain in request path for QQQ.
-
-## Decision hub
-
-`trade_decisions` links: recommendation → saved decision → paper → blotter → positions → review → dashboard metrics.
-
-Key APIs: `POST /api/decisions/save`, `GET /api/decisions`, `POST /api/paper/run`, `GET /api/dashboard/summary`, `GET /api/dashboard/recommendations`.
+- **Pipeline:** `backend/news_intelligence/` (CLI smoke test still available)
+- **IBKR News:** `backend/app/services/news_intelligence/` (ibkr_news_client.py + ibkr_news_adapter.py)
+- **HTTP:** `/api/market-intelligence/*` (full dashboard) + `/api/news-intelligence/*` (QQQ embed)
+- Run CLI: `cd backend && PYTHONPATH=. poetry run python -m news_intelligence.test_news_fetch`
+- Env keys in `backend/.env.example`: `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `SEC_USER_AGENT`, budget limits
+- IBKR News is optional — if IB Gateway unavailable, pipeline falls back to Finnhub/AV/SEC
+- Provider priority: IBKR > SEC EDGAR > Finnhub > Alpha Vantage (SEC stays authoritative for filings)
+- Source quality weights in `news_config.py`: DJ-N=0.95, DJ-RT/DJNL/BRFUPDN=0.90, BRFG=0.85
+- IBKR News client uses `ib_insync`, same pattern as `TwsBroker` but separate client_id (23)
+- MIC page shows IBKR provider status + regime context read-only from `MarketRegimeService`
+- Not yet wired: TDE `news` sub-score → `NewsSignalService`; live Finnhub earnings calendar; IBKR reqNewsArticle (Phase 2)
 
 ## Coding constraints
 
 - Match existing FastAPI + Next.js patterns; **minimal diff**; no drive-by refactors.
-- Link paper/blotter/review events to `decision_id` when touching those flows.
-- Explain feed categories include `broker`, `paper`, `review` (see `models.py` / `event_store.py`).
 - Only commit when the user explicitly asks.
 - Do not create new architecture markdown duplicates.
-- **Always sync docs** per "Mandatory documentation sync" above when behavior/API/UI/config changes.
+- **Always sync docs** per "Mandatory documentation sync" when behavior/API/UI/config changes.
+- Every documented API route must exist in `backend/app/main.py`.
 
 ## Tests and run
 
 ```bash
-cd backend && poetry run pytest
+cd backend && python -m pytest tests/ -q
 cd frontend && npm run build
 ./run_local.sh
-```
-
-TWS smoke test (requires IB Gateway; bootstraps `sys.path` like `seed_qqq_chain_snapshot.py`):
-
-```bash
-cd backend && python scripts/tws_smoke_test.py --quick --skip-strategy
-# Do not run concurrently with backend on the same tws_client_id
-# Alternative: TWS_CLIENT_ID=101 python scripts/tws_smoke_test.py --quick --skip-strategy
 ```

@@ -1,0 +1,252 @@
+.pt-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pt-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.pt-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  background: var(--panel);
+}
+
+.pt-card-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.pt-card-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-top: 0.25rem;
+}
+
+.pt-card-sub {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+.pt-card-positive .pt-card-value {
+  color: #27ae60;
+}
+
+.pt-card-negative .pt-card-value {
+  color: #c0392b;
+}
+
+.pt-filters .pt-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.pt-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.pt-filters input,
+.pt-filters select,
+.pt-field input,
+.pt-field textarea {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+.pt-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.35rem !important;
+}
+
+.pt-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.pt-tabs button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+}
+
+.pt-tabs button.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, var(--panel));
+}
+
+.pt-progress {
+  height: 8px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 80px;
+}
+
+.pt-progress-bar {
+  height: 100%;
+  background: color-mix(in srgb, var(--accent) 70%, #27ae60);
+}
+
+.pt-pnl-pos {
+  color: #27ae60;
+}
+
+.pt-pnl-neg {
+  color: #c0392b;
+}
+
+.pt-row-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.pt-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+
+.pt-modal {
+  width: min(480px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.pt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.pt-detail-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pt-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.pt-subtitle {
+  font-size: 0.95rem;
+  margin: 0.5rem 0;
+}
+
+.pt-metrics-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.pt-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.pt-metric-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.pt-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.pt-chart-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.pt-sparkline {
+  width: 100%;
+  max-width: 280px;
+  color: var(--accent);
+}
+
+.pt-review p {
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+
+.pt-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.pt-auto-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  margin-left: auto;
+}
+
+.pt-sync-log {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.pt-gateway-warn {
+  margin-top: 0.5rem;
+}
+
+.pt-wide-table {
+  font-size: 0.82rem;
+}
+
+.pt-ibkr-badge {
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.banner-success {
+  border: 1px solid #27ae60;
+  background: color-mix(in srgb, #27ae60 12%, var(--panel));
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+}

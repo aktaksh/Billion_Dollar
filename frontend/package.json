@@ -9,9 +9,11 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-table": "^8.20.5",
     "next": "14.2.15",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "recharts": "^2.13.3"
   },
   "devDependencies": {
     "@types/node": "22.7.5",

@@ -13,5 +13,7 @@ backend/.backend.log
 backend/.backend.pid
 .env
 ./backend/.venv/*
+backend/news_intelligence/cache/
+backend/reports/
 
 

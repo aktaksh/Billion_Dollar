@@ -1,0 +1,50 @@
+{
+  "timestamp": "2026-07-02T12:00:00+00:00",
+  "symbol": "QQQ",
+  "underlying_price": 500.0,
+  "bias": "Bullish",
+  "confidence": "High",
+  "reason_summary": "Bullish daily trend",
+  "daily_indicators": { "rsi14": 45.0, "macd_line": 1.2, "atr14": 8.5 },
+  "intraday_indicators": { "rsi14": 48.0, "macd_line": 0.5, "atr14": 2.1 },
+  "spread_candidates": [
+    {
+      "strategy": "Bull call spread",
+      "spread_type": "bull_call_spread",
+      "expiry": "2026-07-18",
+      "dte": 16,
+      "long_leg": "495 (δ0.55)",
+      "short_leg": "500 (δ0.45)",
+      "buy_strike": 495,
+      "sell_strike": 500,
+      "net_debit": 2.5,
+      "max_loss": 250,
+      "max_profit": 250,
+      "breakeven": 497.5,
+      "reward_risk": 1.0,
+      "status": "Accepted"
+    }
+  ],
+  "liquid_options": [
+    {
+      "expiry": "2026-07-18",
+      "dte": 16,
+      "option_type": "call",
+      "strike": 495,
+      "bid": 8.0,
+      "ask": 8.2,
+      "mid": 8.1,
+      "iv": 0.22
+    },
+    {
+      "expiry": "2026-07-18",
+      "dte": 16,
+      "option_type": "call",
+      "strike": 500,
+      "bid": 5.5,
+      "ask": 5.7,
+      "mid": 5.6,
+      "iv": 0.21
+    }
+  ]
+}

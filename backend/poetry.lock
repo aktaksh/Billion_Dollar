@@ -425,6 +425,17 @@ eventkit = "*"
 nest-asyncio = "*"
 
 [[package]]
+name = "ibapi"
+version = "9.81.1.post1"
+description = "Official Interactive Brokers API"
+optional = false
+python-versions = ">=3.1"
+groups = ["main"]
+files = [
+    {file = "ibapi-9.81.1.post1.tar.gz", hash = "sha256:49f6678bf4cced996920f32ad4b48e6897749ac30ba14a661082285f4ec09cd6"},
+]
+
+[[package]]
 name = "idna"
 version = "3.18"
 description = "Internationalized Domain Names in Applications (IDNA)"
@@ -1043,4 +1054,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "dbef676f4d7b403eb66a3d9cc05f820b5d8eb41ae7f00191e0a2602f467db449"
+content-hash = "6724634accee3b61cc5d0e5ccbcb67117e7703e6da6817a564a8755a4887bcae"
