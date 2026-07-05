@@ -74,3 +74,11 @@ def reset_watchlist(svc: MarketIntelligenceService = Depends(get_service)) -> di
 @router.get("/signal/{symbol}")
 def get_signal(symbol: str, svc: MarketIntelligenceService = Depends(get_service)) -> dict[str, Any]:
     return svc.get_latest_signal(symbol.strip().upper())
+
+
+@router.get("/ticker-signals")
+def get_ticker_signals(svc: MarketIntelligenceService = Depends(get_service)) -> list[dict[str, Any]]:
+    """Ticker-level News Signal rows (Part 2) — one row per symbol with
+    consolidated bias, quality, top catalyst/risk. Consumed directly by the
+    deferred Market Intelligence / Opportunity Scanner UI redesign."""
+    return svc.list_ticker_signals()

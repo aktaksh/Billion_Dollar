@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.engine import Engine
+
+# Neutral fallback (not bullish) when a symbol has no ticker_news_signals
+# row yet — the TDE should never assume good news it hasn't seen.
+NEWS_FALLBACK_SCORE = 50.0
+
 DEFAULT_WEIGHTS = {
     "trend": 30,
     "momentum": 20,
@@ -18,8 +24,27 @@ DEFAULT_WEIGHTS = {
 
 
 class TradeScoreCalculator:
-    def __init__(self, weights: dict[str, int] | None = None) -> None:
+    def __init__(self, weights: dict[str, int] | None = None, *, engine: Engine | None = None) -> None:
         self.weights = weights or dict(DEFAULT_WEIGHTS)
+        self._engine = engine
+
+    def _news_score(self, analysis: dict[str, Any]) -> float:
+        """Look up the symbol's ticker_news_signals row and map
+        net_impact_score (-100..100) onto a 0-100 sub-score. Falls back to a
+        neutral 50 (not bullish) when there's no engine or no signal row yet."""
+        symbol = str(analysis.get("symbol") or "").strip().upper()
+        if not self._engine or not symbol:
+            return NEWS_FALLBACK_SCORE
+        try:
+            from app.repositories.news_events_repository import NewsEventsRepository
+
+            row = NewsEventsRepository(self._engine).get_ticker_signal(symbol)
+            if not row:
+                return NEWS_FALLBACK_SCORE
+            net = float(row.get("net_impact_score") or 0.0)
+            return max(0.0, min(100.0, 50.0 + net / 2.0))
+        except Exception:
+            return NEWS_FALLBACK_SCORE
 
     def component_scores(self, analysis: dict[str, Any], regime_scores: dict[str, Any]) -> dict[str, float]:
         daily = analysis.get("daily_indicators") or {}
@@ -55,7 +80,7 @@ class TradeScoreCalculator:
             "liquidity": round(float(liquidity), 1),
             "risk_reward": rr,
             "macro": 50.0,
-            "news": 70.0,
+            "news": round(self._news_score(analysis), 1),
             "paper_statistics": 50.0,
         }
 

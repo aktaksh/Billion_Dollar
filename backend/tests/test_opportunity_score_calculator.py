@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
 from app.services.opportunity_scanner.opportunity_score_calculator import OpportunityScoreCalculator
 
@@ -61,12 +62,102 @@ class OpportunityScoreCalculatorTests(unittest.TestCase):
             catalyst_events=[],
         )
         self.assertEqual(result["direction_candidate"], "Neutral")
-        self.assertIn("Technical data unavailable", result["reason_json"]["technical_summary"])
+        self.assertIn("Technical Confidence: Not Evaluated", result["reason_json"]["technical_summary"])
 
     def test_direction_thresholds(self) -> None:
         self.assertEqual(self.calc._direction(75, 50), "Bullish")
         self.assertEqual(self.calc._direction(50, 75), "Bearish")
         self.assertEqual(self.calc._direction(65, 60), "Neutral")
+
+    def test_direction_mixed_when_both_elevated_and_tied(self) -> None:
+        # Part 9: two strong-but-conflicting signals should be "Mixed", not "Neutral".
+        self.assertEqual(self.calc._direction(68, 66), "Mixed")
+        self.assertEqual(self.calc._direction(55, 55), "Neutral")
+
+    def test_market_opportunity_score_uses_part9_weights(self) -> None:
+        """Market Opportunity Score = 30% catalyst strength + 25% momentum + 20% regime fit
+        + 15% news quality + 5% event timing + 5% paper feedback (Part 9)."""
+        result = self.calc.score_symbol(
+            symbol="NVDA",
+            watchlist_row={"sector": "Semiconductors", "company": "NVIDIA", "priority": 1},
+            analysis=None,
+            news_signal={
+                "label": "Bullish",
+                "news_score_0_to_100": 80,
+                "last_updated": "2026-07-03T09:00:00+00:00",
+                "catalyst_strength_score": 90.0,
+                "news_quality_score": 85.0,
+                "top_catalyst": "Nvidia files 8-K on new supply agreement",
+            },
+            market_regime={"summary": {"regime_name": "Bull Trend", "risk_level": "Low"}},
+            benchmark_analysis=None,
+            paper_trades=[],
+            catalyst_events=[],
+        )
+        self.assertEqual(result["catalyst_strength_score"], 90.0)
+        self.assertEqual(result["news_quality_score"], 85.0)
+        # High catalyst strength + news quality should push opportunity score well above neutral.
+        self.assertGreater(result["market_opportunity_score"], 60)
+
+    def test_top_catalyst_falls_back_to_no_catalyst_message(self) -> None:
+        result = self.calc.score_symbol(
+            symbol="NVDA",
+            watchlist_row={"sector": "Semiconductors", "company": "NVIDIA", "priority": 1},
+            analysis=None,
+            news_signal={"label": "Neutral", "news_score_0_to_100": 50},
+            market_regime=None,
+            benchmark_analysis=None,
+            paper_trades=[],
+            catalyst_events=[],
+        )
+        self.assertEqual(result["top_catalyst"], "No high-quality ticker-specific catalyst")
+
+    def test_trade_readiness_blocked_when_ibkr_unavailable(self) -> None:
+        result = self.calc.score_symbol(
+            symbol="NVDA",
+            watchlist_row={"sector": "Semiconductors", "company": "NVIDIA", "priority": 1},
+            analysis=None,
+            news_signal={"label": "Neutral", "news_score_0_to_100": 50},
+            market_regime=None,
+            benchmark_analysis=None,
+            paper_trades=[],
+            catalyst_events=[],
+            ibkr_available=False,
+            has_recent_trade_decision=True,
+        )
+        self.assertEqual(result["trade_readiness"], "Blocked")
+
+    def test_trade_readiness_ready_when_fresh_and_tde_exists(self) -> None:
+        fresh_analysis = {"timestamp": datetime.now(UTC).isoformat(), "underlying_price": 500}
+        result = self.calc.score_symbol(
+            symbol="NVDA",
+            watchlist_row={"sector": "Semiconductors", "company": "NVIDIA", "priority": 1},
+            analysis=fresh_analysis,
+            news_signal={"label": "Neutral", "news_score_0_to_100": 50},
+            market_regime=None,
+            benchmark_analysis=None,
+            paper_trades=[],
+            catalyst_events=[],
+            ibkr_available=True,
+            has_recent_trade_decision=True,
+        )
+        self.assertEqual(result["technical_confidence"], "Fresh")
+        self.assertEqual(result["trade_readiness"], "Ready")
+
+    def test_trade_readiness_needs_analyze_live_when_stale(self) -> None:
+        result = self.calc.score_symbol(
+            symbol="NVDA",
+            watchlist_row={"sector": "Semiconductors", "company": "NVIDIA", "priority": 1},
+            analysis=None,
+            news_signal={"label": "Neutral", "news_score_0_to_100": 50},
+            market_regime=None,
+            benchmark_analysis=None,
+            paper_trades=[],
+            catalyst_events=[],
+            ibkr_available=True,
+            has_recent_trade_decision=False,
+        )
+        self.assertEqual(result["trade_readiness"], "Needs Analyze Live")
 
 
 if __name__ == "__main__":

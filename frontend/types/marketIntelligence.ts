@@ -132,6 +132,22 @@ export interface MicNewsSignalOutput {
   consumers: string[];
 }
 
+export interface MicTickerSignal {
+  symbol: string;
+  news_bias: "Bullish" | "Bearish" | "Neutral" | string;
+  news_quality_score: number;
+  catalyst_strength_score: number;
+  net_impact_score: number;
+  bullish_count: number;
+  bearish_count: number;
+  neutral_count: number;
+  top_catalyst: string | null;
+  top_risk: string | null;
+  llm_summary: string | null;
+  confidence: "High" | "Medium" | "Low" | string;
+  last_updated: string | null;
+}
+
 export interface MarketIntelligenceDashboard {
   timestamp: string;
   header: MicHeader;

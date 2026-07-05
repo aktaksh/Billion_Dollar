@@ -15,6 +15,8 @@ Research-only options spread analysis for **QQQ** and any ticker. Paper trading 
 
 ## Recommended Workflow
 
+**Full UI SOP** (every button, table, when/why): [Architecture Reference §15](Billion-Dollar-Architecture-Reference.md#15-ui-user-guide-sop).
+
 ```
 1. Market Open Refresh     → lightweight: news + regime + ranking (no IBKR)
 2. Review Opportunity Scanner → pick a symbol
@@ -134,8 +136,11 @@ Trade decision **scoring runs in the browser**; the API persists audit rows only
 | PATCH | `/api/market-intelligence/watchlist/{symbol}` |
 | POST | `/api/market-intelligence/watchlist/reset` |
 | GET | `/api/market-intelligence/signal/{symbol}` |
+| GET | `/api/market-intelligence/ticker-signals` |
 
 Refresh modes: `quick` (24h, top watchlist), `standard` (7d, all enabled), `deep` (7d + full SEC sweep).
+
+`ticker-signals` returns one consolidated row per symbol (bias, quality, top catalyst/risk) instead of raw article rows — see "Ticker-level news intelligence" below.
 
 ### Opportunity Scanner (`/api/opportunity-scanner`)
 
@@ -146,7 +151,7 @@ Refresh modes: `quick` (24h, top watchlist), `standard` (7d, all enabled), `deep
 | GET | `/api/opportunity-scanner/export` |
 | GET | `/api/opportunity-scanner/symbol/{symbol}` |
 
-Ranks watchlist by **Market Opportunity Score** (news/regime/relative-strength only — no stale technicals). Does not output final strategy — use Analyze Live → Options Spread Strategy → Trade Decision Engine.
+Ranks watchlist by **Market Opportunity Score** — Catalyst Strength 30% + Relative Strength/Momentum 25% + Market Regime Fit 20% + News Quality 15% + Earnings/Event Timing 5% + Paper Trading Feedback 5% (news/regime/strength only — no stale technicals). Direction Bias (Bullish/Bearish/Neutral/Mixed) and Trade Readiness (Ready/Needs Analyze Live/Blocked) are separate columns. Does not output final strategy — use Analyze Live → Options Spread Strategy → Trade Decision Engine.
 
 ### AI Report (`/api/ai-report`)
 
@@ -178,7 +183,7 @@ Providers: Finnhub (market + company news), Alpha Vantage (sentiment), SEC EDGAR
 
 When IB Gateway is running on port 4001, IBKR News provides high-quality Dow Jones and Briefing.com headlines. If unavailable, the app falls back to Finnhub/Alpha Vantage/SEC EDGAR seamlessly.
 
-Provider priority: IBKR News > SEC EDGAR > Finnhub > Alpha Vantage.
+Provider priority: **IBKR News** (primary) > **SEC EDGAR** (official filings) > **Alpha Vantage** (earnings calendar/sentiment fallback) > **Finnhub** (general fallback only — its per-symbol company-news fetch is skipped whenever IBKR already covered that symbol this run).
 
 Available IBKR news providers:
 - DJ-N (Dow Jones Global Equity Trader)
@@ -209,6 +214,19 @@ EOF
 ```
 
 Backend runs via `run_local.sh` using Poetry + `pyenv_global` (`../pyenv_global`). Dependency: `ibapi` in `backend/pyproject.toml`.
+
+### Ticker-level news intelligence
+
+Raw headlines are noisy — the same story gets repeated across wires, and articles get attached to the wrong symbol. A second stage consolidates deduped headlines into **one row per symbol** (`ticker_news_signals`) instead of scoring every article individually:
+
+1. **Primary ticker detection** — is this headline actually about NVDA, or does it just mention NVDA in passing? Scored 0-100; below 40 the item doesn't count toward any symbol's score at all, below 60 it can't become a top catalyst.
+2. **Event classification** — 14 categories (SEC filing, earnings, guidance, analyst action, M&A, insider activity, macro, etc.), checked in priority order.
+3. **Clustering** — similar headlines about the same symbol + category get merged into one event instead of showing as repeated rows.
+4. **Impact score** — combines sentiment, primary-ticker confidence, event importance, source quality, and recency into one -100..+100 number per event.
+5. **Ticker signal** — each symbol's events roll up into a bias (Bullish/Bearish/Mixed/Neutral), a top catalyst, a top risk, and a quality score, served at `GET /api/market-intelligence/ticker-signals`.
+6. **Optional OpenAI summary** — for symbols with at least one Critical/High-importance, primary-ticker-score ≥70 cluster (top 10 max, never every article), an LLM produces a structured summary (bullish/bearish factors, key catalyst/risk, sentiment, one-sentence trade context), cached and only regenerated when the qualifying cluster set changes. Falls back to a deterministic rule-based summary if `OPENAI_API_KEY` is unset or the request fails.
+
+This feeds the Trade Decision Engine's news sub-score (neutral 50 if a symbol has no signal yet — never assumes good news). The Market Intelligence dashboard shows this ticker-level table as its default view — raw article rows live in a collapsible "Raw Articles (Diagnostics)" section — and the Opportunity Scanner surfaces the same News Bias/Quality/Top Risk fields per symbol.
 
 ## CLI (optional)
 
@@ -270,10 +288,12 @@ tws_port: 4001
 | `FINNHUB_DAILY_LIMIT` | API budget display limit (default 1000) |
 | `ALPHA_VANTAGE_DAILY_LIMIT` | API budget display limit (default 25) |
 | `SEC_DAILY_LIMIT` | API budget display limit (default 10000) |
+| `OPENAI_API_KEY` | Optional — enables the ticker-level LLM summary layer; unset = deterministic rule-based summary instead |
+| `OPENAI_MODEL` | Optional — defaults to `gpt-4o-mini` |
 
 ## Documentation
 
 | File | Purpose |
 |------|---------|
-| [Billion-Dollar-Architecture-Reference.md](Billion-Dollar-Architecture-Reference.md) | Canonical architecture |
+| [Billion-Dollar-Architecture-Reference.md](Billion-Dollar-Architecture-Reference.md) | Canonical architecture + **§15 UI user SOP** (every button/table) |
 | [PSEUDOCODE.md](PSEUDOCODE.md) | Algorithms, logic flows, and step-by-step pseudocode |

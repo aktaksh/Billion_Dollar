@@ -11,20 +11,33 @@ import NewsSignalOutputPanel from "@/components/market-intelligence/NewsSignalOu
 import RefreshActivityLog from "@/components/market-intelligence/RefreshActivityLog";
 import SecFilingsTable from "@/components/market-intelligence/SecFilingsTable";
 import SentimentAnalyticsPanel from "@/components/market-intelligence/SentimentAnalyticsPanel";
+import TickerSignalDrawer from "@/components/market-intelligence/TickerSignalDrawer";
+import TickerSignalTable from "@/components/market-intelligence/TickerSignalTable";
 import WatchlistManagerTable from "@/components/market-intelligence/WatchlistManagerTable";
 import {
   exportMarketIntelligence,
   getMarketIntelligenceDashboard,
+  getTickerSignals,
   refreshMarketIntelligence,
 } from "@/lib/marketIntelligenceApi";
-import type { MarketIntelligenceDashboard, RefreshMode } from "@/types/marketIntelligence";
+import type { MarketIntelligenceDashboard, MicTickerSignal, RefreshMode } from "@/types/marketIntelligence";
 import "@/styles/market-intelligence.css";
 
 export default function MarketIntelligencePage() {
   const [data, setData] = useState<MarketIntelligenceDashboard | null>(null);
+  const [tickerSignals, setTickerSignals] = useState<MicTickerSignal[]>([]);
+  const [selectedSignal, setSelectedSignal] = useState<MicTickerSignal | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<RefreshMode | "export" | "load" | null>(null);
   const [toast, setToast] = useState("");
+
+  const loadTickerSignals = useCallback(async () => {
+    try {
+      setTickerSignals(await getTickerSignals());
+    } catch {
+      // Ticker-level signals are best-effort; dashboard still renders without them.
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -37,7 +50,8 @@ export default function MarketIntelligencePage() {
     } finally {
       setBusy(null);
     }
-  }, []);
+    void loadTickerSignals();
+  }, [loadTickerSignals]);
 
   useEffect(() => {
     void load();
@@ -61,6 +75,7 @@ export default function MarketIntelligencePage() {
     } finally {
       setBusy(null);
     }
+    void loadTickerSignals();
   }
 
   async function handleExport() {
@@ -127,13 +142,27 @@ export default function MarketIntelligencePage() {
           <MarketRegimeContextCard context={data.regime_context} />
 
           <section className="mic-section panel">
+            <h2 className="mic-section-title">Ticker-Level News Intelligence</h2>
+            <p className="muted-text mic-subtitle">
+              One consolidated signal per symbol — bias, quality, catalyst strength, and top catalyst/risk. Click a row for full detail.
+            </p>
+            <TickerSignalTable rows={tickerSignals} onSelect={setSelectedSignal} />
+          </section>
+
+          <section className="mic-section panel">
             <h2 className="mic-section-title">Watchlist Manager</h2>
             <WatchlistManagerTable rows={data.watchlist} onUpdated={() => void load()} />
           </section>
 
           <section className="mic-section panel">
-            <h2 className="mic-section-title">Critical Events</h2>
-            <CriticalEventsTable events={data.critical_events} />
+            <details className="mic-diagnostics">
+              <summary className="mic-section-title">Raw Articles (Diagnostics) — {data.critical_events.length} events</summary>
+              <p className="muted-text mic-subtitle">
+                Article-level headlines feeding the ticker signals above. Use this only to audit or debug a signal —
+                the ticker table is the primary view.
+              </p>
+              <CriticalEventsTable events={data.critical_events} />
+            </details>
           </section>
 
           <section className="mic-section panel">
@@ -178,6 +207,8 @@ export default function MarketIntelligencePage() {
           )}
         </>
       )}
+
+      <TickerSignalDrawer signal={selectedSignal} onClose={() => setSelectedSignal(null)} />
     </div>
   );
 }

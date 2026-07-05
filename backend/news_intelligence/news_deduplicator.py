@@ -17,10 +17,32 @@ PUBLISHER_SUFFIXES = re.compile(
 PUNCTUATION_RE = re.compile(r"[^\w\s]")
 WHITESPACE_RE = re.compile(r"\s+")
 
+# IBKR-style inline metadata/language tags, e.g. "{A:800015:L:en}".
+IBKR_METADATA_TAG_RE = re.compile(r"\{[A-Za-z]:[\w,.:]+\}")
+IBKR_LANG_TAG_RE = re.compile(r"\{[^}]*L:[^}]*\}")
+# Wire-service continuation/update markers, e.g. "UPDATE 2-", "-2-", "(2)".
+WIRE_MARKER_RE = re.compile(r"^(UPDATE\s+\d+-\s*)|(-\d+-\s*)", re.IGNORECASE)
+WIRE_SUFFIX_MARKER_RE = re.compile(r"\s*-\d+-\s*$")
+
+
+def clean_headline(headline: str) -> str:
+    """Shared display-cleaning step applied to every provider's headline
+    before enrichment/dedup/clustering: strips IBKR metadata/language tags,
+    wire continuation markers, and publisher suffixes, while preserving
+    case for display."""
+    text = headline or ""
+    text = IBKR_LANG_TAG_RE.sub("", text)
+    text = IBKR_METADATA_TAG_RE.sub("", text)
+    text = WIRE_MARKER_RE.sub("", text)
+    text = WIRE_SUFFIX_MARKER_RE.sub("", text)
+    text = PUBLISHER_SUFFIXES.sub("", text)
+    return WHITESPACE_RE.sub(" ", text).strip()
+
 
 def normalize_headline(headline: str) -> str:
-    text = headline.lower().strip()
-    text = PUBLISHER_SUFFIXES.sub("", text)
+    """Lowercase, punctuation-stripped form used only for fuzzy similarity
+    comparison (dedup/clustering) — not for display."""
+    text = clean_headline(headline).lower()
     text = PUNCTUATION_RE.sub(" ", text)
     text = WHITESPACE_RE.sub(" ", text).strip()
     return text

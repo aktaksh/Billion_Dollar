@@ -25,6 +25,7 @@ export default function OpportunityFilters({ filters, sectors, onChange }: Props
             <option value="Bullish">Bullish</option>
             <option value="Bearish">Bearish</option>
             <option value="Neutral">Neutral</option>
+            <option value="Mixed">Mixed</option>
           </select>
         </label>
         <label>

@@ -2,8 +2,11 @@
 
 Refactored: Technical snapshots are NOT used in Market Opportunity Score calculation.
 Score is split into:
-  - market_opportunity_score (0-100): news, regime, relative-strength, sector, catalysts, paper
+  - market_opportunity_score (0-100): ticker-level Catalyst Strength / Momentum / Regime Fit /
+    News Quality / Event Timing / Paper Feedback (Part 9 redesign — see WEIGHTS below)
+  - direction_candidate: "Bullish" | "Bearish" | "Neutral" | "Mixed" (bull/bear split, separate axis)
   - technical_confidence: "Fresh" | "Stale" | "Not Evaluated"
+  - trade_readiness: "Ready" | "Needs Analyze Live" | "Blocked"
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import settings
+from app.services.market_intelligence.news_signal_service import NO_CATALYST_MESSAGE
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -51,24 +55,42 @@ def _technical_confidence(analysis: dict[str, Any] | None) -> str:
 class OpportunityScoreCalculator:
     """Compute direction candidates and market opportunity scores per symbol.
 
-    Market Opportunity Score uses ONLY:
-      - News Intelligence (25%)
-      - Market Regime (20%)
-      - Relative Strength (20%)
-      - Sector Strength (15%)
-      - Catalyst/Earnings proximity (10%)
-      - Paper Trading feedback (10%)
+    Market Opportunity Score (Part 9 redesign) ranks ticker-level opportunity
+    magnitude — NOT raw articles, NOT direction — using:
+      - Catalyst Strength (30%) — from ticker_news_signals.catalyst_strength_score
+      - Relative Strength / Momentum (25%)
+      - Market Regime Fit (20%)
+      - News Quality (15%) — from ticker_news_signals.news_quality_score
+      - Earnings/Event Timing (5%)
+      - Paper Trading Feedback (5%)
 
-    Technical analysis is reported separately as Technical Confidence.
+    Direction Bias (Bullish/Bearish/Neutral/Mixed) is a separate axis computed
+    from bull/bear sub-scores (news, regime, relative strength, sector, catalyst
+    risk, paper feedback) — unchanged by the Part 9 redesign.
+
+    Technical analysis is reported separately as Technical Confidence, and
+    Trade Readiness (Ready/Needs Analyze Live/Blocked) combines snapshot
+    freshness, TDE history, and IBKR broker availability.
     """
 
-    WEIGHTS = {
+    # Bull/bear direction-axis weights (unchanged by Part 9 redesign).
+    DIRECTION_WEIGHTS = {
         "news": 0.25,
         "regime": 0.20,
         "relative_strength": 0.20,
         "sector": 0.15,
         "catalyst_risk": 0.10,
         "paper_feedback": 0.10,
+    }
+
+    # Market Opportunity Score weights — Part 9 spec.
+    OPPORTUNITY_WEIGHTS = {
+        "catalyst_strength": 0.30,
+        "momentum": 0.25,
+        "regime_fit": 0.20,
+        "news_quality": 0.15,
+        "event_timing": 0.05,
+        "paper_feedback": 0.05,
     }
 
     def score_symbol(
@@ -83,6 +105,8 @@ class OpportunityScoreCalculator:
         paper_trades: list[dict[str, Any]],
         catalyst_events: list[dict[str, Any]],
         news_provider_error: bool = False,
+        ibkr_available: bool = True,
+        has_recent_trade_decision: bool = False,
     ) -> dict[str, Any]:
         sym = symbol.strip().upper()
         sector = watchlist_row.get("sector") or "—"
@@ -95,22 +119,23 @@ class OpportunityScoreCalculator:
         catalyst = self._catalyst_scores(sym, catalyst_events, news_signal)
         paper = self._paper_feedback_scores(sym, paper_trades)
 
-        # Bull/bear scoring uses only lightweight signals
+        # --- Direction Bias axis (bull/bear split) ---
+        w = self.DIRECTION_WEIGHTS
         bull_raw = (
-            news["bull"] * self.WEIGHTS["news"]
-            + regime["bull"] * self.WEIGHTS["regime"]
-            + rel["bull"] * self.WEIGHTS["relative_strength"]
-            + sector_score["bull"] * self.WEIGHTS["sector"]
-            + (100 - catalyst["risk"]) * self.WEIGHTS["catalyst_risk"]
-            + paper["score"] * self.WEIGHTS["paper_feedback"]
+            news["bull"] * w["news"]
+            + regime["bull"] * w["regime"]
+            + rel["bull"] * w["relative_strength"]
+            + sector_score["bull"] * w["sector"]
+            + (100 - catalyst["risk"]) * w["catalyst_risk"]
+            + paper["score"] * w["paper_feedback"]
         )
         bear_raw = (
-            news["bear"] * self.WEIGHTS["news"]
-            + regime["bear"] * self.WEIGHTS["regime"]
-            + rel["bear"] * self.WEIGHTS["relative_strength"]
-            + sector_score["bear"] * self.WEIGHTS["sector"]
-            + (100 - catalyst["risk"]) * self.WEIGHTS["catalyst_risk"]
-            + (100 - paper["score"]) * self.WEIGHTS["paper_feedback"]
+            news["bear"] * w["news"]
+            + regime["bear"] * w["regime"]
+            + rel["bear"] * w["relative_strength"]
+            + sector_score["bear"] * w["sector"]
+            + (100 - catalyst["risk"]) * w["catalyst_risk"]
+            + (100 - paper["score"]) * w["paper_feedback"]
         )
 
         bull_score = _clamp(bull_raw)
@@ -122,19 +147,29 @@ class OpportunityScoreCalculator:
         relative_strength_score = _clamp((rel["bull"] + rel["bear"]) / 2)
         paper_feedback_score = _clamp(paper["score"])
 
+        # --- Market Opportunity Score axis (Part 9 — ticker-level magnitude) ---
+        catalyst_strength_score = self._catalyst_strength_score(news_signal)
+        news_quality_score = self._news_quality_score(news_signal, news)
+        momentum_score = _clamp(max(rel["bull"], rel["bear"]))
+        regime_fit_score = _clamp(max(regime["bull"], regime["bear"]))
+        event_timing_score = self._event_timing_score(catalyst, news_signal)
+
+        ow = self.OPPORTUNITY_WEIGHTS
+        market_opportunity_score = _clamp(
+            catalyst_strength_score * ow["catalyst_strength"]
+            + momentum_score * ow["momentum"]
+            + regime_fit_score * ow["regime_fit"]
+            + news_quality_score * ow["news_quality"]
+            + event_timing_score * ow["event_timing"]
+            + paper_feedback_score * ow["paper_feedback"]
+        )
+
         risk = self._risk_score(
             news_signal=news_signal,
             catalyst=catalyst,
             bull_score=bull_score,
             bear_score=bear_score,
             news_provider_error=news_provider_error,
-        )
-
-        base_opp = max(bull_score, bear_score)
-        market_opportunity_score = _clamp(
-            base_opp
-            - risk * 0.30
-            - (10 if news_provider_error else 0)
         )
 
         confidence = self._confidence(
@@ -146,6 +181,11 @@ class OpportunityScoreCalculator:
 
         tech_confidence = _technical_confidence(analysis)
         snapshot_age = _snapshot_age_minutes(analysis)
+        trade_readiness = self._trade_readiness(
+            ibkr_available=ibkr_available,
+            tech_confidence=tech_confidence,
+            has_recent_trade_decision=has_recent_trade_decision,
+        )
 
         data_quality = self._data_quality(news, news_provider_error, market_regime)
         reason = self._build_reason(
@@ -170,6 +210,9 @@ class OpportunityScoreCalculator:
         if analysis and tech_confidence == "Fresh":
             tech_score_legacy = self._compute_legacy_technical_score(analysis)
 
+        top_catalyst = news_signal.get("top_catalyst") or NO_CATALYST_MESSAGE
+        top_risk = news_signal.get("top_risk_event")
+
         return {
             "symbol": sym,
             "company": company,
@@ -183,14 +226,18 @@ class OpportunityScoreCalculator:
             "confidence_score": confidence,
             "risk_score": risk,
             "news_score": news_score,
+            "news_quality_score": news_quality_score,
+            "catalyst_strength_score": catalyst_strength_score,
             "technical_score": tech_score_legacy,
             "technical_confidence": tech_confidence,
+            "trade_readiness": trade_readiness,
             "liquidity_score": 0.0,  # only available after Analyze Live
             "market_regime_score": market_regime_score,
             "relative_strength_score": relative_strength_score,
             "paper_feedback_score": paper_feedback_score,
             "next_earnings": catalyst.get("next_earnings"),
-            "top_catalyst": news_signal.get("top_catalyst") or catalyst.get("top_catalyst"),
+            "top_catalyst": top_catalyst,
+            "top_risk": top_risk,
             "market_context": market_context,
             "data_quality": data_quality,
             "reason_json": reason,
@@ -216,7 +263,48 @@ class OpportunityScoreCalculator:
             return "Bullish"
         if bear >= 70 and bear - bull >= 15:
             return "Bearish"
+        if bull >= 65 and bear >= 65 and abs(bull - bear) < 15:
+            return "Mixed"
         return "Neutral"
+
+    @staticmethod
+    def _catalyst_strength_score(news_signal: dict[str, Any]) -> float:
+        """Ticker-level catalyst strength (Part 7's catalyst_strength_score).
+
+        Falls back to a neutral baseline when the symbol hasn't been through
+        the ticker-level clustering pipeline yet (legacy news signal path).
+        """
+        val = news_signal.get("catalyst_strength_score")
+        if val is None:
+            return 40.0
+        return _clamp(float(val))
+
+    @staticmethod
+    def _news_quality_score(news_signal: dict[str, Any], news: dict[str, Any]) -> float:
+        """Ticker-level news_quality_score, falling back to the legacy news score."""
+        val = news_signal.get("news_quality_score")
+        if val is None:
+            return _clamp(float(news.get("score") or 50.0))
+        return _clamp(float(val))
+
+    @staticmethod
+    def _event_timing_score(catalyst: dict[str, Any], news_signal: dict[str, Any]) -> float:
+        """How timely/actionable the next known catalyst is (0-100, higher = more timely)."""
+        score = 50.0
+        if catalyst.get("next_earnings"):
+            score += 20.0
+        top_catalyst = news_signal.get("top_catalyst")
+        if top_catalyst and top_catalyst != NO_CATALYST_MESSAGE:
+            score += 15.0
+        return _clamp(score)
+
+    @staticmethod
+    def _trade_readiness(*, ibkr_available: bool, tech_confidence: str, has_recent_trade_decision: bool) -> str:
+        if not ibkr_available:
+            return "Blocked"
+        if tech_confidence == "Fresh" and has_recent_trade_decision:
+            return "Ready"
+        return "Needs Analyze Live"
 
     def _news_scores(self, news_signal: dict[str, Any], provider_error: bool) -> dict[str, Any]:
         if provider_error:
@@ -458,8 +546,10 @@ class OpportunityScoreCalculator:
             bullets.append(f"Bull score {bull_score:.0f} leads bear {bear_score:.0f}")
         elif direction == "Bearish":
             bullets.append(f"Bear score {bear_score:.0f} leads bull {bull_score:.0f}")
+        elif direction == "Mixed":
+            bullets.append(f"Conflicting strong signals (bull {bull_score:.0f}, bear {bear_score:.0f})")
         else:
-            bullets.append(f"Mixed signals (bull {bull_score:.0f}, bear {bear_score:.0f})")
+            bullets.append(f"Neutral — no clear edge (bull {bull_score:.0f}, bear {bear_score:.0f})")
 
         if news.get("summary") and news["summary"] != "No recent news":
             bullets.append(f"News: {news['summary'][:80]}")

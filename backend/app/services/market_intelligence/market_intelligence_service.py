@@ -68,19 +68,32 @@ class MarketIntelligenceService:
         return self._repo().find_recent_items(datetime.now(UTC) - timedelta(days=since_days))
 
     def _ibkr_provider_status(self) -> dict[str, Any]:
+        """Non-blocking status for dashboard reads — never opens a TWS connection."""
         if self._ibkr_news is None:
             return {"available": False, "message": "IBKR News not configured"}
         try:
-            available, msg = self._ibkr_news.is_available()
-            providers = self._ibkr_news.available_providers if available else []
-            cache = self._ibkr_news.cache_stats
+            providers = list(getattr(self._ibkr_news, "_available_providers", []) or [])
+            connected = bool(getattr(self._ibkr_news, "_connected", False))
+            cache = getattr(self._ibkr_news, "cache_stats", {}) or {}
+            last_fetch = self._last_ibkr_status.get("last_fetch") if self._last_ibkr_status else None
+            errors = list(self._last_ibkr_status.get("errors", [])) if self._last_ibkr_status else []
+
+            if self._last_ibkr_status:
+                message = f"Last IBKR news fetch: {last_fetch or '—'}"
+                if errors:
+                    message = f"{message} ({errors[0]})"
+            elif connected:
+                message = f"IBKR News session active on {getattr(self._ibkr_news, '_host', 'TWS')}"
+            else:
+                message = "IBKR News idle — run refresh to fetch headlines"
+
             return {
-                "available": available,
-                "message": msg,
+                "available": connected or (bool(last_fetch) and not errors),
+                "message": message,
                 "providers_detected": providers,
                 "cache_status": cache,
-                "last_fetch": self._last_ibkr_status.get("last_fetch") if self._last_ibkr_status else None,
-                "errors": self._last_ibkr_status.get("errors", []) if self._last_ibkr_status else [],
+                "last_fetch": last_fetch,
+                "errors": errors,
             }
         except Exception as exc:
             return {"available": False, "message": f"IBKR status check failed: {exc}"}
@@ -92,7 +105,12 @@ class MarketIntelligenceService:
                 "message": "Market Regime service unavailable.",
             }
         try:
-            dash = self._mr.get_cached_or_build()
+            dash = self._mr.get_cached_dashboard()
+            if not dash:
+                return {
+                    "available": False,
+                    "message": "Regime data not loaded yet — open Market Regime or run refresh.",
+                }
             summary = dash.get("summary") or {}
             vol = dash.get("volatility") or {}
             catalysts = dash.get("catalysts") or []
@@ -412,6 +430,32 @@ class MarketIntelligenceService:
                 "neutral_count": sig.get("neutral_count", 0),
             },
         }
+
+    def list_ticker_signals(self) -> list[dict[str, Any]]:
+        """All persisted ticker_news_signals rows (Part 2/11) — ticker-level
+        intelligence for the deferred UI redesign to consume directly."""
+        from app.repositories.news_events_repository import NewsEventsRepository
+
+        rows = NewsEventsRepository(self.engine).list_ticker_signals()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            last_updated = row.get("last_updated")
+            out.append({
+                "symbol": row["symbol"],
+                "news_bias": row.get("news_bias", "Neutral"),
+                "news_quality_score": row.get("news_quality_score", 0.0),
+                "catalyst_strength_score": row.get("catalyst_strength_score", 0.0),
+                "net_impact_score": row.get("net_impact_score", 0.0),
+                "bullish_count": row.get("bullish_count", 0),
+                "bearish_count": row.get("bearish_count", 0),
+                "neutral_count": row.get("neutral_count", 0),
+                "top_catalyst": row.get("top_catalyst"),
+                "top_risk": row.get("top_risk"),
+                "llm_summary": row.get("llm_summary"),
+                "confidence": row.get("confidence", "Low"),
+                "last_updated": last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated,
+            })
+        return out
 
     def get_latest_signal(self, symbol: str) -> dict[str, Any]:
         sig = self._signals().signal_for_symbol(symbol)

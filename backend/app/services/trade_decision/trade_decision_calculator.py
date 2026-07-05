@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.engine import Engine
+
 from app.services.market_regime.indicator_helpers import count_trend_checks
 from app.services.trade_decision.decision_explanation_service import DecisionExplanationService
 from app.services.trade_decision.strategy_ranking_engine import StrategyRankingEngine
@@ -11,8 +13,8 @@ from app.services.trade_decision.trade_score_calculator import TradeScoreCalcula
 
 
 class TradeDecisionCalculator:
-    def __init__(self, weights: dict[str, int] | None = None) -> None:
-        self._scores = TradeScoreCalculator(weights)
+    def __init__(self, weights: dict[str, int] | None = None, *, engine: Engine | None = None) -> None:
+        self._scores = TradeScoreCalculator(weights, engine=engine)
         self._ranking = StrategyRankingEngine()
         self._explainer = DecisionExplanationService()
 

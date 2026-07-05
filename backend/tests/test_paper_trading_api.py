@@ -26,6 +26,7 @@ class PaperTradingApiTests(unittest.TestCase):
         self._db_path = Path(self._tmpdir.name) / "test_paper.db"
         self._data_dir = Path(self._tmpdir.name) / "data"
         self._data_dir.mkdir()
+        self._orig_database_url = settings.database_url
         settings.database_url = f"sqlite:///{self._db_path}"
         settings.qqq_analyzer_data_dir = str(self._data_dir)
         self._client_ctx = TestClient(app)
@@ -35,6 +36,7 @@ class PaperTradingApiTests(unittest.TestCase):
 
     def tearDown(self):
         self._client_ctx.__exit__(None, None, None)
+        settings.database_url = self._orig_database_url
         self._tmpdir.cleanup()
 
     def test_create_list_close_trade(self):

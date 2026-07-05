@@ -153,6 +153,10 @@ class MarketRegimeService:
             return self._cache
         return self.build_dashboard()
 
+    def get_cached_dashboard(self) -> dict[str, Any] | None:
+        """Return in-memory dashboard only — never triggers live broker/API fetches."""
+        return self._cache
+
     def save_snapshot(self, dashboard: dict[str, Any] | None = None) -> dict[str, Any]:
         data = dashboard or self.get_cached_or_build()
         now = datetime.now(UTC)

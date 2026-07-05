@@ -24,6 +24,7 @@ from news_intelligence.news_config import (
     NewsConfig,
     load_config,
 )
+from news_intelligence.news_clusterer import cluster_events
 from news_intelligence.news_deduplicator import deduplicate_items
 from news_intelligence.news_models import (
     FetchLog,
@@ -35,10 +36,18 @@ from news_intelligence.news_models import (
     normalize_finnhub_market,
     normalize_sec_filing,
 )
-from news_intelligence.news_relevance import enrich_item
+from news_intelligence.news_relevance import (
+    classify_event_category,
+    compute_impact_score,
+    enrich_item,
+    source_quality_weight,
+)
 from news_intelligence.news_repository import NewsRepository, get_repository
 from news_intelligence.news_sentiment_rules import score_sentiment
+from news_intelligence.primary_ticker_detector import resolve_primary_symbol
 from news_intelligence.sec_edgar_client import SecEdgarClient, SecEdgarError
+from news_intelligence.openai_summary import build_llm_ticker_summary
+from news_intelligence.ticker_signal_builder import build_ticker_signals
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +75,88 @@ def _process_items(items: list[NewsItem]) -> list[NewsItem]:
     return out
 
 
+def _enrich_v2_items(items: list[NewsItem]) -> None:
+    """Populate the new ticker-level pipeline fields (Parts 4/5/7) on each
+    item in place: resolved primary symbol, canonical category, source
+    quality weight, and the -100..100 impact_score."""
+    from news_intelligence.ticker_registry import get_default_registry
+
+    registry = get_default_registry()
+    for item in items:
+        symbol, score = resolve_primary_symbol(item, registry)
+        item.resolved_symbol = symbol
+        item.primary_ticker_score = score
+        item.event_category = classify_event_category(item)
+        item.source_quality = source_quality_weight(item)
+        item.impact_score_v2 = compute_impact_score(
+            sentiment_score=item.sentiment_score,
+            primary_ticker_score=item.primary_ticker_score,
+            category=item.event_category,
+            source_quality=item.source_quality,
+            published_at=item.published_at,
+        )
+
+
+def _run_ticker_signal_pipeline(
+    items: list[NewsItem],
+    symbols: list[str],
+    repository: NewsRepository,
+) -> None:
+    """Build and persist news_events clusters + ticker_news_signals for this
+    run's symbols (Parts 6/7/11). Registered as a distinct step so it can be
+    unit-tested independently of the legacy news_items pipeline."""
+    from app.repositories.news_events_repository import NewsEventsRepository
+
+    _enrich_v2_items(items)
+    clusters = cluster_events(items)
+    signals = build_ticker_signals(clusters)
+
+    # Union of requested run symbols + any symbol a cluster resolved to
+    # (e.g. an item fetched under NVDA's query but reassigned to PLTR) so
+    # replace-for-symbols stays idempotent and doesn't accumulate duplicates.
+    affected_symbols = sorted({s.upper() for s in symbols} | {c["symbol"] for c in clusters})
+
+    events_repo = NewsEventsRepository(repository.engine)
+    events_repo.replace_events_for_symbols(affected_symbols, clusters)
+    _apply_llm_summaries(signals, clusters, events_repo)
+    events_repo.upsert_ticker_signals(signals)
+
+
+def _apply_llm_summaries(signals: list[dict[str, Any]], clusters: list[dict[str, Any]], events_repo: Any) -> None:
+    """Part 8 — optional OpenAI cluster summary, applied on top of the
+    rule-based `llm_summary` sentence `build_ticker_signals` already set.
+
+    Best-effort per symbol: any failure here must never break signal
+    persistence, and symbols with no qualifying Critical/High events keep
+    their existing rule-based sentence untouched (never overwritten with a
+    "nothing to report" message).
+    """
+    clusters_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for c in clusters:
+        clusters_by_symbol.setdefault(c["symbol"], []).append(c)
+
+    for sig in signals:
+        symbol = sig["symbol"]
+        symbol_clusters = clusters_by_symbol.get(symbol, [])
+        try:
+            cached = events_repo.get_ticker_signal(symbol)
+            summary, fingerprint = build_llm_ticker_summary(
+                symbol,
+                symbol_clusters,
+                cached_hash=(cached or {}).get("llm_cluster_hash"),
+                cached_summary=(cached or {}).get("llm_summary_json"),
+            )
+        except Exception as exc:
+            logger.warning("LLM ticker summary failed for %s: %s", symbol, exc)
+            continue
+
+        if summary is None:
+            continue
+        sig["llm_summary"] = summary.get("ticker_summary") or sig.get("llm_summary")
+        sig["llm_summary_json"] = summary
+        sig["llm_cluster_hash"] = fingerprint
+
+
 def run_news_pipeline(
     symbols: list[str] | None = None,
     from_date: datetime | None = None,
@@ -85,6 +176,9 @@ def run_news_pipeline(
 
     summary = NewsPipelineSummary()
     all_items: list[NewsItem] = []
+    # Symbols IBKR already returned headlines for this run — Finnhub
+    # company-news is only a fallback for symbols NOT covered here.
+    ibkr_covered_symbols: set[str] = set()
 
     # Step 0: IBKR News (optional, highest priority)
     if ibkr_news_client is not None:
@@ -109,7 +203,10 @@ def run_news_pipeline(
                     if res.error:
                         ibkr_errors.append(f"IBKR {res.symbol}: {res.error}")
                     else:
-                        ibkr_items.extend(normalize_ibkr_result(res))
+                        normalized = normalize_ibkr_result(res)
+                        if normalized:
+                            ibkr_covered_symbols.add(res.symbol.upper())
+                        ibkr_items.extend(normalized)
 
                 ibkr_items = deduplicate_ibkr_items(ibkr_items)
                 all_items.extend(ibkr_items)
@@ -175,9 +272,11 @@ def run_news_pipeline(
                 error_message=str(exc),
             ))
 
-        # Step 2: Finnhub company news
+        # Step 2: Finnhub company news — fallback only. Skip symbols IBKR
+        # already covered this run (source priority: Part 1).
         company_fetched = 0
-        for sym in syms:
+        fallback_syms = [s for s in syms if s not in ibkr_covered_symbols]
+        for sym in fallback_syms:
             try:
                 raw = finnhub.fetch_company_news(sym, from_s, to_s)
                 items = [normalize_finnhub_company(r, sym) for r in raw]
@@ -185,12 +284,17 @@ def run_news_pipeline(
                 company_fetched += len(items)
             except FinnhubError as exc:
                 summary.provider_errors.append(f"Finnhub {sym}: {exc}")
+        if len(fallback_syms) < len(syms):
+            logger.info(
+                "Finnhub company-news: skipped %d symbol(s) already covered by IBKR",
+                len(syms) - len(fallback_syms),
+            )
         summary.total_fetched += company_fetched
         repository.insert_fetch_log(FetchLog(
             provider="FINNHUB",
             status="ok" if company_fetched else "partial",
             request_type="company_news",
-            symbols_requested=syms,
+            symbols_requested=fallback_syms,
             items_fetched=company_fetched,
         ))
 
@@ -271,6 +375,15 @@ def run_news_pipeline(
     saved, skipped = repository.insert_items_batch(unique, known_urls)
     summary.total_saved = saved
     summary.duplicates_removed += skipped
+
+    # Steps 12-14 (new): primary-ticker resolution -> canonical classification
+    # -> clustering -> ticker_news_signals. Best-effort — any failure here
+    # must never break the legacy news_items pipeline above.
+    try:
+        _run_ticker_signal_pipeline(unique, syms, repository)
+    except Exception as exc:
+        logger.warning("Ticker signal pipeline failed: %s", exc)
+        summary.provider_errors.append(f"ticker_signal_pipeline: {exc}")
 
     # Sentiment counts on unique items processed
     for item in unique:

@@ -1,10 +1,30 @@
-"""Relevance scoring, event classification, and impact calculation."""
+"""Relevance scoring, event classification, and impact calculation.
+
+Two generations of logic live here side by side:
+  - Legacy: `classify_event_type` + `compute_relevance` + `compute_impact`
+    populate `news_items` columns exactly as before (small ~[-1, 1] impact
+    scale) so existing dashboards/consumers are unaffected.
+  - New (Part 5/7): `classify_event_category` (14 canonical categories) +
+    `compute_impact_score` (-100..100 scale) feed the new `news_events` /
+    `ticker_news_signals` tables consumed by the redesigned ticker-level
+    intelligence layer.
+"""
 
 from __future__ import annotations
 
-import re
+from datetime import UTC, datetime
 
-from news_intelligence.news_config import QQQ_WEIGHT_PRIORITY, SOURCE_QUALITY_WEIGHTS
+from news_intelligence.news_categories import (
+    IMPORTANCE_SCORES,
+    to_legacy_event_type,
+)
+from news_intelligence.news_config import (
+    QQQ_WEIGHT_PRIORITY,
+    RECENCY_DECAY_WINDOW_HOURS,
+    RECENCY_FULL_WEIGHT_HOURS,
+    RECENCY_MIN_WEIGHT,
+    SOURCE_QUALITY_WEIGHTS,
+)
 from news_intelligence.news_models import NewsItem
 
 EVENT_WEIGHTS: dict[str, float] = {
@@ -41,45 +61,110 @@ IBKR_EVENT_RULES: list[tuple[str, tuple[str, ...]]] = [
 
 
 def classify_event_type(item: NewsItem) -> str:
+    """Legacy lowercase snake_case classifier — now a thin shim over the new
+    canonical classifier so `news_items.event_type` / `_importance()` /
+    `_critical_events()` keep working unchanged."""
+    category = classify_event_category(item)
+    return to_legacy_event_type(category)
+
+
+# --- New canonical classifier (Part 5) ---------------------------------
+
+_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "SEC_FILING",
+        (
+            "files 8-k", "files 8k", "files 10-q", "files 10q", "files 10-k", "files 10k",
+            "sec filing", "files s-1", "files s-3", "form 8-k", "form 10-q", "form 10-k",
+        ),
+    ),
+    (
+        "LEGAL_REGULATORY",
+        (
+            "lawsuit", "sues", "sued", "investigation", "probe", "sec charges", "sec charged",
+            "regulatory", "settlement", "fine of", "class action", "subpoena", "antitrust",
+        ),
+    ),
+    (
+        "EARNINGS",
+        (
+            "beats eps", "misses eps", "beats revenue estimates", "misses revenue estimates",
+            "beats earnings estimates", "misses earnings estimates", "beats estimates",
+            "misses estimates", "quarterly earnings", "reports quarterly", "earnings call",
+            "earnings report", "q1 earnings", "q2 earnings", "q3 earnings", "q4 earnings",
+            "reports record revenue", "reports revenue of", "eps of $",
+        ),
+    ),
+    (
+        "GUIDANCE",
+        ("raises guidance", "lowers guidance", "cuts guidance", "guidance", "outlook", "raises forecast", "lowers forecast"),
+    ),
+    (
+        "ANALYST_ACTION",
+        (
+            "upgraded", "downgraded", "upgrades", "downgrades", "price target", "initiated coverage",
+            "initiates coverage", "reiterates", "reiterated", "maintains rating", "analyst",
+        ),
+    ),
+    (
+        "PRODUCT",
+        ("launches", "unveils", "announces new", "introduces", "new chip", "product launch", "rolls out"),
+    ),
+    (
+        "PARTNERSHIP",
+        ("partners with", "partnership", "collaboration", "contract win", "joint venture", "signs deal with"),
+    ),
+    (
+        "M_AND_A",
+        ("merger", "acquisition", "acquire", "acquires", "to acquire", "takeover", "buyout"),
+    ),
+    (
+        "INSIDER_ACTIVITY",
+        ("insider", "form 4", "director sells", "director buys", "ceo sells", "ceo buys", "insider sells", "insider buys"),
+    ),
+    (
+        "INSTITUTIONAL_OWNERSHIP",
+        (
+            "stake in", "holds shares", "13f", "ownership stake", "trims stake", "boosts stake",
+            "position in", "raises stake", "cuts stake",
+        ),
+    ),
+    (
+        "MACRO",
+        ("fed ", "fomc", "cpi", "inflation", "jobs report", "gdp", "interest rate", "federal reserve", "treasury yield"),
+    ),
+    (
+        "INDUSTRY_SECTOR",
+        ("sector", "industry-wide", "industry wide", "chipmakers", "peers", "semiconductor stocks", "tech stocks"),
+    ),
+    (
+        "GENERAL_MARKET",
+        ("dow jones", "s&p 500", "s&p500", "nasdaq futures", "wall street", "stock market today", "futures point"),
+    ),
+]
+
+
+def classify_event_category(item: NewsItem) -> str:
+    """Classify `item` into one of the 14 canonical categories, checked in
+    the exact spec priority order. Does NOT rely on the mere presence of the
+    word "earnings" alone — EARNINGS requires a stronger contextual phrase
+    (see `_CATEGORY_RULES`)."""
     if item.provider == "SEC_EDGAR":
         form = (item.raw_json or {}).get("form_type", "")
         if form == "4":
-            return "insider"
-        if form == "8-K":
-            return "legal_regulatory"
-        return "filing"
+            return "INSIDER_ACTIVITY"
+        return "SEC_FILING"
 
     text = f"{item.headline} {item.summary}".lower()
 
-    # IBKR-specific rules (higher priority for known patterns)
-    if item.provider == "IBKR":
-        for event_type, keywords in IBKR_EVENT_RULES:
-            if any(k in text for k in keywords):
-                return event_type
+    for category, keywords in _CATEGORY_RULES:
+        if any(kw in text for kw in keywords):
+            return category
 
     if item.category == "market_news" or item.symbol == "MARKET":
-        if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "jobs report", "gdp")):
-            return "macro"
-        return "market_news"
+        return "GENERAL_MARKET"
 
-    rules: list[tuple[str, tuple[str, ...]]] = [
-        ("earnings", ("earnings", "eps", "quarterly results", "q1 ", "q2 ", "q3 ", "q4 ")),
-        ("guidance", ("guidance", "outlook", "forecast")),
-        ("analyst_rating", ("upgrade", "downgrade", "price target", "analyst")),
-        ("legal_regulatory", ("lawsuit", "investigation", "probe", "sec ", "regulatory")),
-        ("merger_acquisition", ("merger", "acquisition", "acquire", "takeover")),
-        ("dividend_buyback", ("dividend", "buyback", "repurchase")),
-        ("partnership", ("partnership", "collaboration", "contract win")),
-        ("product", ("launch", "unveil", "product", "chip")),
-        ("insider", ("insider", "form 4")),
-    ]
-    for event_type, keywords in rules:
-        if any(k in text for k in keywords):
-            return event_type
-
-    if item.category == "company_news":
-        return "company_news"
-    return "other"
+    return "OTHER"
 
 
 def compute_relevance(item: NewsItem, primary_symbol: str | None = None) -> float:
@@ -118,6 +203,8 @@ def compute_relevance(item: NewsItem, primary_symbol: str | None = None) -> floa
 
 
 def compute_impact(sentiment_score: float, relevance_score: float, event_type: str) -> float:
+    """Legacy impact score (~[-1, 1] scale). Unchanged — still populates
+    `news_items.impact_score` for backward compatibility."""
     weight = EVENT_WEIGHTS.get(event_type, EVENT_WEIGHTS["other"])
     return round(sentiment_score * relevance_score * weight, 4)
 
@@ -127,3 +214,61 @@ def enrich_item(item: NewsItem, primary_symbol: str | None = None) -> NewsItem:
     item.relevance_score = compute_relevance(item, primary_symbol)
     item.impact_score = compute_impact(item.sentiment_score, item.relevance_score, item.event_type)
     return item
+
+
+# --- New impact-score formula (Part 7) ---------------------------------
+
+
+def source_quality_weight(item: NewsItem) -> float:
+    """Resolve the source-quality weight for `item` per the provider weight
+    table (SEC=1.00, IBKR DJ-N=0.95 etc, Finnhub=0.70, AV=0.65)."""
+    if item.provider == "SEC_EDGAR":
+        return SOURCE_QUALITY_WEIGHTS.get("SEC_EDGAR", 1.00)
+    if item.provider == "IBKR":
+        provider_code = (item.raw_json or {}).get("provider_code", "")
+        return SOURCE_QUALITY_WEIGHTS.get(f"IBKR_{provider_code}", 0.80)
+    if item.provider == "FINNHUB":
+        return SOURCE_QUALITY_WEIGHTS.get("FINNHUB", 0.70)
+    if item.provider == "ALPHA_VANTAGE":
+        return SOURCE_QUALITY_WEIGHTS.get("ALPHA_VANTAGE", 0.65)
+    return 0.60
+
+
+def recency_weight(published_at: datetime | None, *, now: datetime | None = None) -> float:
+    """Linear decay from 1.0 (<=24h old) to a 0.3 floor at 7 days."""
+    if published_at is None:
+        return RECENCY_MIN_WEIGHT
+    ref = now or datetime.now(UTC)
+    pub = published_at if published_at.tzinfo else published_at.replace(tzinfo=UTC)
+    hours_old = max(0.0, (ref - pub).total_seconds() / 3600.0)
+    if hours_old <= RECENCY_FULL_WEIGHT_HOURS:
+        return 1.0
+    decay_span = RECENCY_DECAY_WINDOW_HOURS - RECENCY_FULL_WEIGHT_HOURS
+    if decay_span <= 0:
+        return RECENCY_MIN_WEIGHT
+    fraction = min(1.0, (hours_old - RECENCY_FULL_WEIGHT_HOURS) / decay_span)
+    weight = 1.0 - fraction * (1.0 - RECENCY_MIN_WEIGHT)
+    return max(RECENCY_MIN_WEIGHT, weight)
+
+
+def compute_impact_score(
+    *,
+    sentiment_score: float,
+    primary_ticker_score: float,
+    category: str,
+    source_quality: float,
+    published_at: datetime | None,
+    now: datetime | None = None,
+) -> float:
+    """impact_score = sentiment * (primary_ticker/100) * (importance/100)
+    * source_quality * recency, scaled to [-100, 100]."""
+    importance = IMPORTANCE_SCORES.get(category, IMPORTANCE_SCORES["OTHER"])
+    recency = recency_weight(published_at, now=now)
+    raw = (
+        sentiment_score
+        * (primary_ticker_score / 100.0)
+        * (importance / 100.0)
+        * source_quality
+        * recency
+    )
+    return round(max(-100.0, min(100.0, raw * 100.0)), 2)

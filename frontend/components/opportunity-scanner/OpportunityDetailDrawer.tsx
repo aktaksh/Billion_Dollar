@@ -2,12 +2,15 @@
 
 import Link from "next/link";
 
+import { biasClass, confidenceClass } from "@/components/market-intelligence/TickerSignalTable";
+import type { MicTickerSignal } from "@/types/marketIntelligence";
 import type { OpportunityScanRow } from "@/types/opportunityScanner";
 
-import DirectionCandidateBadge, { OpportunityScoreBadge } from "./OpportunityScoreBadge";
+import DirectionCandidateBadge, { OpportunityScoreBadge, readinessBadgeClass } from "./OpportunityScoreBadge";
 
 type Props = {
   row: OpportunityScanRow | null;
+  tickerSignal?: MicTickerSignal | null;
   onClose: () => void;
 };
 
@@ -32,7 +35,7 @@ function ListSection({ title, items }: { title: string; items?: string[] }) {
   );
 }
 
-export default function OpportunityDetailDrawer({ row, onClose }: Props) {
+export default function OpportunityDetailDrawer({ row, tickerSignal, onClose }: Props) {
   if (!row) return null;
   const detail = row.reason_json ?? {};
 
@@ -47,9 +50,28 @@ export default function OpportunityDetailDrawer({ row, onClose }: Props) {
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
           <DirectionCandidateBadge direction={row.direction_candidate} />
           <span>Opportunity <OpportunityScoreBadge score={row.opportunity_score} /></span>
+          <span className={readinessBadgeClass(row.trade_readiness ?? "Needs Analyze Live")}>
+            {row.trade_readiness ?? "Needs Analyze Live"}
+          </span>
           <span className="muted-text">Bull {row.bull_score.toFixed(0)} / Bear {row.bear_score.toFixed(0)}</span>
         </div>
         {row.market_context && <p className="muted-text">{row.market_context}</p>}
+
+        <div className="os-drawer-section">
+          <h4>Ticker News Signal</h4>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.35rem" }}>
+            {tickerSignal && <span className={biasClass(tickerSignal.news_bias)}>{tickerSignal.news_bias}</span>}
+            {tickerSignal && <span className={confidenceClass(tickerSignal.confidence)}>{tickerSignal.confidence} confidence</span>}
+            <span className="muted-text">Quality {(row.news_quality_score ?? 0).toFixed(0)}</span>
+            <span className="muted-text">Catalyst Strength {(row.catalyst_strength_score ?? 0).toFixed(0)}</span>
+          </div>
+          {tickerSignal && (
+            <p className="muted-text">
+              Bullish {tickerSignal.bullish_count} / Bearish {tickerSignal.bearish_count} / Neutral {tickerSignal.neutral_count}
+            </p>
+          )}
+          {row.top_risk && <p><strong>Top risk:</strong> {row.top_risk}</p>}
+        </div>
 
         <ListSection title="Bull Evidence" items={detail.bull_evidence} />
         <ListSection title="Bear Evidence" items={detail.bear_evidence} />

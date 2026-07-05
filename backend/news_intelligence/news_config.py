@@ -42,8 +42,64 @@ HTTP_TIMEOUT_SECONDS = 10.0
 FINNHUB_MAX_RETRIES = 2
 SEC_MIN_REQUEST_INTERVAL = 0.12  # ~8 req/s
 ALPHA_VANTAGE_MAX_TICKERS = 3
-HEADLINE_SIMILARITY_THRESHOLD = 0.88
-DEDUP_WINDOW_HOURS = 48
+HEADLINE_SIMILARITY_THRESHOLD = 0.86
+DEDUP_WINDOW_HOURS = 72
+
+# Clustering (coarser grouping of already-deduped items into news_events).
+# Default threshold is stricter; the looser threshold only applies when items
+# also share the same source family (in addition to same symbol + category).
+CLUSTER_SIMILARITY_THRESHOLD = 0.70
+CLUSTER_SIMILARITY_THRESHOLD_SAME_FAMILY = 0.55
+
+# Primary-ticker-score gating thresholds (Part 4).
+PRIMARY_TICKER_MIN_FOR_CATALYST = 60
+PRIMARY_TICKER_MIN_FOR_INCLUSION = 40
+
+# Provider -> source family, used to decide when the looser cluster
+# similarity threshold is allowed to apply.
+SOURCE_FAMILY: dict[str, str] = {
+    "IBKR": "IBKR",
+    "SEC_EDGAR": "SEC",
+    "FINNHUB": "FINNHUB",
+    "ALPHA_VANTAGE": "ALPHA_VANTAGE",
+}
+
+BROAD_MARKET_KEYWORDS: tuple[str, ...] = (
+    "dow jones",
+    "s&p 500",
+    "s&p500",
+    "nasdaq futures",
+    "nasdaq composite",
+    "wall street",
+    "stock market today",
+    "futures point to",
+    "stocks to watch",
+    "premarket movers",
+)
+
+SECTOR_KEYWORDS: tuple[str, ...] = (
+    "sector",
+    "industry-wide",
+    "industry wide",
+    "chipmakers",
+    "semiconductor stocks",
+    "peers",
+    "tech stocks",
+    "bank stocks",
+)
+
+# Recency decay for impact_score: linear from 1.0 at <=24h to a 0.3 floor at 7 days.
+RECENCY_FULL_WEIGHT_HOURS = 24.0
+RECENCY_DECAY_WINDOW_HOURS = 168.0
+RECENCY_MIN_WEIGHT = 0.3
+
+# Ticker News Signal bias thresholds (Part 7).
+NEWS_BIAS_BULLISH_THRESHOLD = 20.0
+NEWS_BIAS_BEARISH_THRESHOLD = -20.0
+NEWS_BIAS_MIXED_MIN_MAGNITUDE = 10.0
+
+# TDE fallback when a symbol has no ticker_news_signals row yet — neutral, not bullish.
+TDE_NEWS_FALLBACK_SCORE = 50.0
 
 # IBKR News source quality weights (used by scoring pipeline)
 SOURCE_QUALITY_WEIGHTS: dict[str, float] = {

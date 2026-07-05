@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from app.config import settings
-from app.db import paper_trades
+from app.db import paper_trades, trade_decisions
 from app.repositories.opportunity_repository import OpportunityRepository
 from app.repositories.watchlist_repository import WatchlistRepository
+from app.services.broker.broker_provider import get_broker_provider
 from app.services.market_intelligence.news_signal_service import NewsSignalService
 from app.services.market_regime.catalyst_calendar_service import CatalystCalendarService
 from app.services.market_regime.data_adapters import MarketDataAdapters
@@ -77,6 +78,8 @@ class OpportunityScannerService:
         catalyst_events = self._catalysts.upcoming()
         paper_trade_rows = self._load_paper_trades()
         news_provider_error = self._news_provider_error()
+        ibkr_available = self._ibkr_broker_available()
+        recent_tde_symbols = self._recent_trade_decision_symbols()
 
         # Dependency validation
         upstream_warnings = self._validate_upstream(market_regime)
@@ -96,12 +99,18 @@ class OpportunityScannerService:
                 paper_trades=paper_trade_rows,
                 catalyst_events=catalyst_events,
                 news_provider_error=news_provider_error,
+                ibkr_available=ibkr_available,
+                has_recent_trade_decision=sym.upper() in recent_tde_symbols,
             )
             scored["reason"] = scored.get("reason_json", {}).get("summary", "—")
             rj = scored["reason_json"]
             rj["sector"] = scored.get("sector")
             rj["company"] = scored.get("company")
             rj["priority"] = scored.get("priority")
+            rj["catalyst_strength_score"] = scored.get("catalyst_strength_score")
+            rj["news_quality_score"] = scored.get("news_quality_score")
+            rj["trade_readiness"] = scored.get("trade_readiness")
+            rj["top_risk"] = scored.get("top_risk")
             rows.append(scored)
 
         rows.sort(key=lambda r: (-r["market_opportunity_score"], r.get("priority", 99)))
@@ -174,6 +183,31 @@ class OpportunityScannerService:
             rows = conn.execute(select(paper_trades)).mappings().all()
         return [dict(r) for r in rows]
 
+    def _ibkr_broker_available(self) -> bool:
+        """One live check per scan (not per-symbol) — Trade Readiness = Blocked when False.
+
+        Best-effort: any failure to even construct/query the broker provider is treated
+        as "unavailable" rather than raising, since this must never break a scan.
+        """
+        try:
+            ok, _ = get_broker_provider().is_available()
+            return bool(ok)
+        except Exception:
+            return False
+
+    def _recent_trade_decision_symbols(self) -> set[str]:
+        """Symbols with a Trade Decision Engine record within the technical staleness
+        window — used as the "TDE exists" half of Trade Readiness = Ready."""
+        cutoff = datetime.now(UTC) - timedelta(minutes=settings.technical_stale_minutes)
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(
+                    select(trade_decisions.c.symbol).where(trade_decisions.c.timestamp >= cutoff).distinct()
+                ).all()
+            return {r[0].upper() for r in rows if r[0]}
+        except Exception:
+            return set()
+
     def _news_provider_error(self) -> bool:
         with self._engine.connect() as conn:
             from app.db import news_fetch_log
@@ -212,14 +246,18 @@ class OpportunityScannerService:
             "confidence_score": row["confidence_score"],
             "risk_score": row["risk_score"],
             "news_score": row["news_score"],
+            "news_quality_score": reason.get("news_quality_score", row["news_score"]),
+            "catalyst_strength_score": reason.get("catalyst_strength_score", 0.0),
             "technical_score": row["technical_score"],
             "technical_confidence": tech_confidence,
+            "trade_readiness": reason.get("trade_readiness", "Needs Analyze Live"),
             "liquidity_score": row.get("liquidity_score", 0),
             "market_regime_score": row.get("market_regime_score"),
             "relative_strength_score": row.get("relative_strength_score"),
             "paper_feedback_score": row.get("paper_feedback_score"),
             "next_earnings": row.get("next_earnings"),
             "top_catalyst": row.get("top_catalyst"),
+            "top_risk": reason.get("top_risk"),
             "market_context": row.get("market_context"),
             "data_quality": row.get("data_quality"),
             "reason": reason.get("summary") or "—",

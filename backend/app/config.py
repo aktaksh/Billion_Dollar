@@ -5,6 +5,30 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv() -> None:
+    env_path = _BACKEND_DIR / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False)
+    except ImportError:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
 
 class AppConfig(BaseModel):
     app_name: str = "Billion Dollar API"

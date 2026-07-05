@@ -1,12 +1,12 @@
 # Billion Dollar — System Pseudocode & Logic Flows
 
-**Last updated:** 2026-07-04  
+**Last updated:** 2026-07-05  
 **Status:** Options alpha research platform (6 tabs + global refresh)  
 **Audience:** ChatGPT or any reviewer — paste this file for architecture review without opening the full repo.
 
 **Canonical spec:** `Billion-Dollar-Architecture-Reference.md`  
 **User guide:** `README.md`  
-**Cursor rules:** `.cursor/rules/billion-dollar-project.mdc`
+**UI SOP (buttons, tables, daily workflow):** `Billion-Dollar-Architecture-Reference.md` §15
 
 ---
 
@@ -247,7 +247,8 @@ FUNCTION computeTradeDecision(data, analytics?):
 **Purpose:** Rank watchlist symbols using lightweight data ONLY. Never downloads option chains.
 
 ```text
-WEIGHTS = {
+# Direction Bias axis (bull/bear split) — unchanged by the Part 9 redesign.
+DIRECTION_WEIGHTS = {
   news: 0.25,
   regime: 0.20,
   relative_strength: 0.20,
@@ -256,24 +257,47 @@ WEIGHTS = {
   paper_feedback: 0.10
 }
 
-FUNCTION score_symbol(symbol, watchlist_row, news_signal, market_regime, ...):
-  # NO technical snapshot in scoring formula
-  bull_raw = weighted sum of news.bull, regime.bull, rel.bull, sector.bull, ...
-  bear_raw = weighted sum of news.bear, regime.bear, rel.bear, sector.bear, ...
-  direction = Bullish if bull >= 70 and bull - bear >= 15, else Bearish/Neutral
+# Market Opportunity Score axis (Part 9 redesign) — ticker-level magnitude,
+# NOT raw articles, NOT direction.
+OPPORTUNITY_WEIGHTS = {
+  catalyst_strength: 0.30,   # ticker_news_signals.catalyst_strength_score (40 baseline pre-clustering)
+  momentum: 0.25,            # max(rel.bull, rel.bear) — magnitude regardless of direction
+  regime_fit: 0.20,          # max(regime.bull, regime.bear)
+  news_quality: 0.15,        # ticker_news_signals.news_quality_score
+  event_timing: 0.05,        # +20 if earnings within window, +15 if a qualifying top catalyst exists
+  paper_feedback: 0.05
+}
 
-  market_opportunity_score = max(bull, bear) - risk_penalty
+FUNCTION score_symbol(symbol, watchlist_row, news_signal, market_regime, ibkr_available, has_recent_trade_decision, ...):
+  # NO technical snapshot in either scoring formula
+  bull_raw = weighted sum (DIRECTION_WEIGHTS) of news.bull, regime.bull, rel.bull, sector.bull, ...
+  bear_raw = weighted sum (DIRECTION_WEIGHTS) of news.bear, regime.bear, rel.bear, sector.bear, ...
+  direction_candidate = "Bullish" if bull >= 70 and bull - bear >= 15
+                        else "Bearish" if bear >= 70 and bear - bull >= 15
+                        else "Mixed" if bull >= 65 and bear >= 65 and |bull - bear| < 15   # both elevated + tied
+                        else "Neutral"
+
+  market_opportunity_score = weighted sum (OPPORTUNITY_WEIGHTS) of catalyst_strength, momentum,
+                                                                    regime_fit, news_quality,
+                                                                    event_timing, paper_feedback
+  # NOTE: risk is reported as its own column, no longer subtracted from the score
 
   # Technical Confidence (metadata only, NOT in score)
   IF snapshot exists AND age < TECHNICAL_STALE_MINUTES: "Fresh"
   ELIF snapshot exists AND age >= threshold: "Stale"
   ELSE: "Not Evaluated"
 
+  trade_readiness = "Blocked" IF NOT ibkr_available   # checked once per scan, not per-symbol
+                    ELSE "Ready" IF technical_confidence == "Fresh" AND has_recent_trade_decision
+                    ELSE "Needs Analyze Live"
+
+  top_catalyst = news_signal.top_catalyst ELSE "No high-quality ticker-specific catalyst"
+
   RETURN {
-    market_opportunity_score,
-    technical_confidence,
-    direction_candidate,
-    bull_score, bear_score,
+    market_opportunity_score, catalyst_strength_score, news_quality_score,
+    technical_confidence, trade_readiness,
+    direction_candidate,  # Bullish/Bearish/Neutral/Mixed
+    bull_score, bear_score, top_catalyst, top_risk,
     technical_hint  # "Click Analyze Live" or "Will refresh on Analyze Live"
   }
 ```
@@ -418,6 +442,109 @@ IBKR NEWS CLIENT (ibkr_news_client.py):
 
 ---
 
+## 11a. Ticker-level news intelligence (news_events / ticker_news_signals)
+
+**Package:** `backend/news_intelligence/` (`news_categories.py`, `ticker_registry.py`, `primary_ticker_detector.py`, `news_clusterer.py`, `ticker_signal_builder.py`) · **Persistence:** `backend/app/repositories/news_events_repository.py`
+
+```text
+# Runs after the legacy news_items pipeline (Section 11) on the same
+# deduped item list. Best-effort: any failure here is caught and logged,
+# never breaks the legacy pipeline.
+
+FUNCTION run_ticker_signal_pipeline(deduped_items, run_symbols, repository):
+  FOR each item in deduped_items:
+    # 1. Primary ticker resolution (Part 4)
+    candidates = dedupe([item.symbol] + item.symbols) excluding "MARKET"
+    best_symbol, best_score = argmax_over(candidates,
+        compute_primary_ticker_score(item, candidate))
+    item.resolved_symbol = best_symbol
+    item.primary_ticker_score = best_score        # 0-100
+
+    # 2. Canonical classification (Part 5) — priority order, first match wins
+    item.event_category = classify_event_category(item)
+      # SEC_FILING > LEGAL_REGULATORY > EARNINGS > GUIDANCE > ANALYST_ACTION
+      # > PRODUCT > PARTNERSHIP > M_AND_A > INSIDER_ACTIVITY
+      # > INSTITUTIONAL_OWNERSHIP > MACRO > INDUSTRY_SECTOR > GENERAL_MARKET > OTHER
+      # EARNINGS requires a strong phrase, not just the word "earnings"
+
+    # 3. New impact score (Part 7), -100..100 scale (separate from legacy news_items.impact_score)
+    item.source_quality = source_quality_weight(item)   # SEC=1.00, IBKR DJ-N=0.95, ... Finnhub=0.70, AV=0.65
+    item.impact_score_v2 = compute_impact_score(
+        sentiment_score, primary_ticker_score, category, source_quality, published_at)
+      # = sentiment * (primary_ticker/100) * (importance/100) * source_quality * recency
+      # recency: 1.0 for <=24h, linear decay to 0.3 floor at 7 days
+
+  # 4. Clustering (Part 6) — excludes Finnhub GENERAL_MARKET items entirely,
+  #    excludes items with primary_ticker_score < 40
+  eligible = [i for i in items if not finnhub_general_market(i)
+                                 and i.primary_ticker_score >= 40]
+  GROUP eligible BY (resolved_symbol, event_category)
+  WITHIN each group, merge into a cluster when headline similarity is:
+    >= 0.70  (default), OR
+    >= 0.55  (only if both items share the same source family, e.g. both IBKR)
+  EACH cluster -> one news_events row:
+    title = highest primary_ticker_score item's headline
+    sentiment_score = primary_ticker_score-weighted average
+    importance_score = IMPORTANCE_SCORES[category]
+    primary_ticker_score = max across cluster items
+    source_quality_score = max across cluster items
+    impact_score = cluster item with largest |impact_score_v2|
+    confidence = High/Medium/Low from source_count + primary_ticker_score
+
+  # 5. Ticker signal build (Part 7) — one ticker_news_signals row per symbol
+  FOR each symbol's clusters:
+    qualifying = clusters WHERE primary_ticker_score >= 60   # catalyst threshold
+    bullish = qualifying WHERE impact_score > 0
+    bearish = qualifying WHERE impact_score < 0
+    net_impact_score = clamp(sum(bullish.impact) + sum(bearish.impact), -100, 100)
+    news_bias = "Bullish" IF net > +20
+              ELSE "Bearish" IF net < -20
+              ELSE "Mixed" IF both sides material
+              ELSE "Neutral"
+    top_catalyst = title of highest-impact bullish qualifying cluster (else null)
+    top_risk     = title of lowest-impact bearish qualifying cluster (else null)
+    news_quality_score = avg(source_quality_score across ALL clusters) * 100
+    UPSERT ticker_news_signals row for symbol
+
+  DELETE+INSERT news_events for (run_symbols UNION resolved cluster symbols)  # idempotent per run
+  UPSERT ticker_news_signals rows
+
+CONSUMERS (external dict shape unchanged either way):
+  NewsSignalService.signal_for_symbol(sym):
+    row = ticker_news_signals[sym]
+    IF row exists: RETURN mapped dict (news_score = clamp(50 + net/2, 0, 100), label = news_bias, ...)
+    ELSE: RETURN legacy per-item aggregation (as before)
+
+  TradeScoreCalculator.component_scores(analysis, ...):
+    row = ticker_news_signals[analysis.symbol]
+    news_component = clamp(50 + row.net_impact_score/2, 0, 100) IF row exists
+                     ELSE 50.0   # neutral fallback — NOT the old hardcoded 70.0
+
+API: GET /api/market-intelligence/ticker-signals -> all symbols' current rows
+
+  # 6. Optional OpenAI cluster summary (Part 8) — on top of step 5's rule-based sentence
+  FOR each symbol's signal:
+    qualifying_for_llm = clusters WHERE primary_ticker_score >= 70 AND importance_label IN (Critical, High)
+    top 10 BY (importance_score, |impact_score|) DESC
+    IF qualifying_for_llm is empty: SKIP (keep step 5's rule-based llm_summary untouched)
+    fingerprint = sha256(sorted "{cluster_id}:{impact_score}" for qualifying_for_llm)
+    IF fingerprint == cached llm_cluster_hash: REUSE cached llm_summary_json  # never regenerate unchanged clusters
+    ELIF OPENAI_API_KEY missing OR request fails:
+      llm_summary_json = rule_based_structured_summary(qualifying_for_llm)   # same shape, source="rule_based"
+    ELSE:
+      llm_summary_json = OpenAI(model=gpt-4o-mini) -> {ticker_summary, bullish_factors, bearish_factors,
+                                                        key_catalyst, key_risk, sentiment_label,
+                                                        confidence, one_sentence_trade_context}
+    llm_summary = llm_summary_json.ticker_summary   # plain string, backward compatible
+    llm_cluster_hash = fingerprint
+
+DEFERRED: none — Parts 1-11 of the news/opportunity redesign are implemented
+          (ticker-level table UI + drawer, revised Opportunity Scanner columns
+          in Part 9 below, and the OpenAI layer above are all live)
+```
+
+---
+
 ## 12. Paper Trading Lab
 
 ```text
@@ -484,6 +611,7 @@ GET  /api/market-intelligence/watchlist
 PATCH /api/market-intelligence/watchlist/{symbol}
 POST /api/market-intelligence/watchlist/reset
 GET  /api/market-intelligence/signal/{symbol}
+GET  /api/market-intelligence/ticker-signals
 
 # News Intelligence (QQQ embed)
 POST /api/news-intelligence/quick-refresh
@@ -580,14 +708,16 @@ POST /api/paper-trading/mark/{symbol}
 
 | Gap | Detail |
 |-----|--------|
-| News → TDE | Frontend uses `risk_notes` regex; not `NewsSignalService` |
-| IBKR → API budget | Pipeline still calls Finnhub/AV/SEC after IBKR even when headlines succeed |
-| IBKR headline quality | Many DJ-N items are market-wide futures columns, not ticker-specific catalysts |
-| IBKR Phase 2 | No reqNewsArticle; no skip-Finnhub-when-IBKR-available optimization |
-| News → Phase 2 catalyst | Static calendar; not reading `news_items` |
+| News → TDE (frontend) | Frontend still uses `risk_notes` regex; backend Python TDE now reads `ticker_news_signals` (neutral-50 fallback, Section 11a) |
+| Opportunity Scanner summary buckets | `Mixed` direction rows count toward `summary.neutral_count` in the header card — no separate `mixed_count` bucket yet |
+| OpenAI cluster summary cost/quality | Live end-to-end (Section 11a) but unverified against a real `OPENAI_API_KEY` in this environment (sandboxed, no outbound network) — rule-based fallback path is what's actually been exercised |
+| IBKR → API budget | Finnhub company-news is now skipped per-symbol once IBKR covers it this run (Section 11a), but budget accounting doesn't reflect the skip |
+| IBKR headline quality | Many DJ-N items are market-wide futures columns; primary-ticker scoring now caps/excludes these, but no cross-edition dedup at the IBKR-provider level itself |
+| IBKR Phase 2 | No reqNewsArticle full-text fetch yet |
+| News → Phase 2 catalyst | Static calendar; not reading `news_items` / `news_events` |
 | Phase 2 macro | Yields/DXY stubbed unavailable |
 | Phase 2 multi-TF | 15m / 1H / Weekly placeholders |
-| Backend TDE mirror | macro/news/volatility sub-scores stubbed in Python |
+| Backend TDE mirror | macro/volatility sub-scores still stubbed in Python (news sub-score no longer stubbed) |
 | Live earnings calendar | Stub — earnings from news headlines + catalyst stub |
 
 ---

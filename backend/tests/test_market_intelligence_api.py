@@ -127,3 +127,35 @@ def test_get_signal_delegates():
         svc.get_latest_signal.assert_called_once_with("QQQ")
     finally:
         _clear_svc()
+
+
+def test_ticker_signals_endpoint():
+    svc = MagicMock()
+    svc.list_ticker_signals.return_value = [
+        {
+            "symbol": "NVDA",
+            "news_bias": "Bullish",
+            "news_quality_score": 88.0,
+            "catalyst_strength_score": 45.0,
+            "net_impact_score": 38.0,
+            "bullish_count": 3,
+            "bearish_count": 1,
+            "neutral_count": 0,
+            "top_catalyst": "NVDA beats earnings estimates",
+            "top_risk": None,
+            "llm_summary": "3 bullish catalyst(s) outweigh 1 risk event(s).",
+            "confidence": "High",
+            "last_updated": "2026-07-05T10:00:00+00:00",
+        }
+    ]
+    _with_svc(svc)
+    try:
+        res = client.get("/api/market-intelligence/ticker-signals")
+        assert res.status_code == 200
+        body = res.json()
+        assert len(body) == 1
+        assert body[0]["symbol"] == "NVDA"
+        assert body[0]["news_bias"] == "Bullish"
+        svc.list_ticker_signals.assert_called_once()
+    finally:
+        _clear_svc()

@@ -1,4 +1,6 @@
-export type DirectionCandidate = "Bullish" | "Bearish" | "Neutral";
+export type DirectionCandidate = "Bullish" | "Bearish" | "Neutral" | "Mixed";
+
+export type TradeReadiness = "Ready" | "Needs Analyze Live" | "Blocked";
 
 export interface OpportunityReasonDetail {
   summary?: string;
@@ -34,15 +36,19 @@ export interface OpportunityScanRow {
   confidence_score: number;
   risk_score: number;
   news_score: number;
+  news_quality_score?: number;
+  catalyst_strength_score?: number;
   technical_score: number;
   technical_confidence?: string;
   technical_hint?: string | null;
+  trade_readiness?: TradeReadiness | string;
   liquidity_score: number;
   market_regime_score?: number;
   relative_strength_score?: number;
   paper_feedback_score?: number;
   next_earnings?: string | null;
   top_catalyst?: string | null;
+  top_risk?: string | null;
   market_context?: string | null;
   reason: string;
   reason_json?: OpportunityReasonDetail;

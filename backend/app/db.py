@@ -213,6 +213,51 @@ news_fetch_log = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+news_events = Table(
+    "news_events",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("cluster_id", String(64), nullable=False, index=True),
+    Column("symbol", String(16), nullable=False, index=True),
+    Column("primary_category", String(32), nullable=False, index=True),
+    Column("subtype", String(64), nullable=True),
+    Column("title", Text, nullable=False),
+    Column("summary", Text, nullable=True),
+    Column("source_count", Integer, nullable=False, default=1),
+    Column("sources_json", JSON, nullable=True),
+    Column("article_ids_json", JSON, nullable=True),
+    Column("earliest_time", DateTime(timezone=True), nullable=True),
+    Column("latest_time", DateTime(timezone=True), nullable=True, index=True),
+    Column("sentiment_score", Float, nullable=False, default=0.0),
+    Column("importance_score", Float, nullable=False, default=0.0),
+    Column("primary_ticker_score", Float, nullable=False, default=0.0),
+    Column("source_quality_score", Float, nullable=False, default=0.0),
+    Column("impact_score", Float, nullable=False, default=0.0),
+    Column("confidence", String(16), nullable=False, default="Low"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+ticker_news_signals = Table(
+    "ticker_news_signals",
+    metadata,
+    Column("symbol", String(16), primary_key=True),
+    Column("news_bias", String(16), nullable=False, default="Neutral"),
+    Column("news_quality_score", Float, nullable=False, default=0.0),
+    Column("catalyst_strength_score", Float, nullable=False, default=0.0),
+    Column("net_impact_score", Float, nullable=False, default=0.0),
+    Column("bullish_count", Integer, nullable=False, default=0),
+    Column("bearish_count", Integer, nullable=False, default=0),
+    Column("neutral_count", Integer, nullable=False, default=0),
+    Column("top_catalyst", Text, nullable=True),
+    Column("top_risk", Text, nullable=True),
+    Column("llm_summary", Text, nullable=True),
+    Column("llm_summary_json", JSON, nullable=True),
+    Column("llm_cluster_hash", String(64), nullable=True),
+    Column("confidence", String(16), nullable=False, default="Low"),
+    Column("last_updated", DateTime(timezone=True), nullable=True),
+)
+
 market_intelligence_watchlist = Table(
     "market_intelligence_watchlist",
     metadata,
@@ -284,6 +329,11 @@ def _migrate_schema(engine: Engine) -> None:
         nfl_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(news_fetch_log)")}
         if "refresh_mode" not in nfl_cols:
             conn.exec_driver_sql("ALTER TABLE news_fetch_log ADD COLUMN refresh_mode VARCHAR(16)")
+        tns_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(ticker_news_signals)")}
+        if "llm_summary_json" not in tns_cols:
+            conn.exec_driver_sql("ALTER TABLE ticker_news_signals ADD COLUMN llm_summary_json JSON")
+        if "llm_cluster_hash" not in tns_cols:
+            conn.exec_driver_sql("ALTER TABLE ticker_news_signals ADD COLUMN llm_cluster_hash VARCHAR(64)")
 
 
 def get_engine(database_url: str) -> Engine:

@@ -8,6 +8,17 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import _load_dotenv
+
+_load_dotenv()
+
+
+@pytest.fixture(autouse=True)
+def _disable_ibkr_news(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ibkr_news_enabled", False)
+
 
 class MockBroker:
     """Stub broker so smoke tests never block on TWS/Gateway connect."""
@@ -46,6 +57,7 @@ def client(mock_broker: MockBroker) -> TestClient:
     with (
         patch("app.services.broker.broker_provider.get_broker_provider", return_value=mock_broker),
         patch("app.services.market_regime.data_adapters.get_broker_provider", return_value=mock_broker),
+        patch("app.services.opportunity_scanner.opportunity_scanner_service.get_broker_provider", return_value=mock_broker),
     ):
         from app.main import app
 

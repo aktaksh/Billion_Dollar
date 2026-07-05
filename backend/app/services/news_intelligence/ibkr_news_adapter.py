@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
-from typing import Any
 
 from news_intelligence.news_models import NewsItem
 from app.services.news_intelligence.ibkr_news_client import IbkrHeadline, IbkrNewsResult
-
-METADATA_PATTERN = re.compile(r"\{[A-Za-z]:[\w,.:]+\}")
-LANG_PATTERN = re.compile(r"\{[^}]*L:[^}]*\}")
 
 SOURCE_QUALITY_WEIGHTS: dict[str, float] = {
     "SEC_EDGAR": 1.00,
@@ -21,24 +16,17 @@ SOURCE_QUALITY_WEIGHTS: dict[str, float] = {
     "BRFG": 0.85,
 }
 
-IBKR_EVENT_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("sec_filing", ("files 8k", "files 10q", "files 10k", "files 8-k", "files 10-q", "files 10-k")),
-    ("analyst_rating", ("upgraded", "downgraded", "reiterated", "target", "initiated", "maintains")),
-    ("earnings", ("earnings", "results", "revenue", "eps", "quarterly")),
-    ("guidance", ("guidance", "outlook", "raises", "lowers", "forecast")),
-    ("partnership", ("partners", "partnership", "collaboration", "contract")),
-    ("product", ("launches", "unveils", "announces", "introduces", "plan")),
-    ("dividend_buyback", ("dividend", "buyback", "repurchase")),
-    ("merger_acquisition", ("acquisition", "acquire", "merger", "takeover")),
-    ("legal_regulatory", ("lawsuit", "investigation", "sec charges", "regulatory")),
-]
-
 
 def clean_headline(headline: str) -> str:
-    """Remove IBKR metadata tags like {A:800015:L:en} from headlines."""
-    text = LANG_PATTERN.sub("", headline)
-    text = METADATA_PATTERN.sub("", text)
-    return text.strip()
+    """Remove IBKR metadata tags like {A:800015:L:en} from headlines.
+
+    Delegates to the shared `news_deduplicator.clean_headline` (which also
+    strips wire-continuation markers and publisher suffixes) so all
+    providers go through one headline-cleaning implementation.
+    """
+    from news_intelligence.news_deduplicator import clean_headline as _shared_clean_headline
+
+    return _shared_clean_headline(headline)
 
 
 def _parse_ibkr_timestamp(ts_str: str) -> datetime | None:
@@ -57,12 +45,30 @@ def _parse_ibkr_timestamp(ts_str: str) -> datetime | None:
 
 
 def classify_ibkr_event(headline: str) -> str:
-    """Classify event type from IBKR headline text."""
-    text = headline.lower()
-    for event_type, keywords in IBKR_EVENT_RULES:
-        if any(kw in text for kw in keywords):
-            return event_type
-    return "company_news"
+    """Classify event type from IBKR headline text.
+
+    Delegates to the canonical 14-category classifier (`classify_event_category`)
+    and maps down to the legacy lowercase value so `news_items.event_type`
+    keeps its existing shape. This avoids maintaining a second, drifting
+    keyword table alongside `news_relevance._CATEGORY_RULES`.
+    """
+    from news_intelligence.news_categories import to_legacy_event_type
+    from news_intelligence.news_models import NewsItem
+    from news_intelligence.news_relevance import classify_event_category
+
+    stub = NewsItem(
+        provider="IBKR",
+        source="",
+        symbol="",
+        category="company_news",
+        headline=headline,
+        summary="",
+        url="",
+        published_at=None,
+    )
+    category = classify_event_category(stub)
+    legacy = to_legacy_event_type(category)
+    return legacy if legacy != "market_news" else "company_news"
 
 
 def source_quality_weight(provider_code: str) -> float:

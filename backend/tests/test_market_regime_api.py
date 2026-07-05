@@ -19,6 +19,7 @@ if FASTAPI_AVAILABLE:
     from app.services.market_regime.market_regime_service import MarketRegimeService
     from app.services.market_regime.strategy_matrix_engine import StrategyMatrixEngine
     from app.db import get_engine, init_db
+    from app.config import settings
 
 
 def _qqq_fixture() -> dict:
@@ -87,7 +88,11 @@ class MarketRegimeApiTests(unittest.TestCase):
         path.write_text(json.dumps(_qqq_fixture()), encoding="utf-8")
 
         self._db_path = Path(self._tmpdir.name) / "test_regime.db"
-        self._engine = get_engine(f"sqlite:///{self._db_path}")
+        from app.config import settings
+
+        self._orig_database_url = settings.database_url
+        settings.database_url = f"sqlite:///{self._db_path}"
+        self._engine = get_engine(settings.database_url)
         init_db(self._engine)
 
         self._orig_analysis_dir = None
@@ -99,11 +104,6 @@ class MarketRegimeApiTests(unittest.TestCase):
             return self._data_dir / f"latest_analysis_{sym.strip().upper()}.json"
 
         sa._qqq_analysis_path = _patched
-
-        from app.routes import market_regime as mr_route
-
-        self._service = MarketRegimeService(self._engine, analysis_dir_fn=_patched)
-        mr_route.set_market_regime_service(self._service)
 
         class _MockBroker:
             name = "mock"
@@ -119,12 +119,22 @@ class MarketRegimeApiTests(unittest.TestCase):
             return_value=_MockBroker(),
         )
         self._broker_patch.start()
-        self.client = TestClient(app)
+
+        from app.routes import market_regime as mr_route
+
+        self._service = MarketRegimeService(self._engine, analysis_dir_fn=_patched)
+        self._client_ctx = TestClient(app)
+        self.client = self._client_ctx.__enter__()
+        # Lifespan overwrites route services on startup — re-apply test doubles.
+        mr_route.set_market_regime_service(self._service)
 
     def tearDown(self):
         import app.routes.spread_analyzer as sa
+        from app.config import settings
 
+        self._client_ctx.__exit__(None, None, None)
         self._broker_patch.stop()
+        settings.database_url = self._orig_database_url
         sa._qqq_analysis_path = self._orig_fn
         self._tmpdir.cleanup()
 

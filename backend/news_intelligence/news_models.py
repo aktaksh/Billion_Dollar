@@ -59,6 +59,15 @@ class NewsItem:
     id: str = field(default_factory=_new_id)
     created_at: datetime = field(default_factory=_now)
     av_sentiment_score: float | None = None
+    # New ticker-level pipeline fields (not persisted to news_items columns —
+    # only used in-memory to build news_events / ticker_news_signals). Kept
+    # separate from `symbol`/`symbols` so legacy news_items rows and
+    # consumers are never touched by primary-ticker resolution.
+    resolved_symbol: str = ""
+    event_category: str = "OTHER"
+    primary_ticker_score: int = 0
+    source_quality: float = 0.0
+    impact_score_v2: float = 0.0
 
 
 @dataclass

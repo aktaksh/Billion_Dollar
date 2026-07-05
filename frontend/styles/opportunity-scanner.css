@@ -89,6 +89,11 @@
   color: #cbd5e1;
 }
 
+.os-badge-mixed {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
 .os-score-high {
   color: #4ade80;
 }

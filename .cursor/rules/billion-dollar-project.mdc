@@ -51,6 +51,8 @@ Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper T
 | Paper trades + IBKR sync | `backend/app/services/paper_trade_service.py`, `ibkr/` |
 | Market Intelligence | `backend/app/services/market_intelligence/` |
 | News Intelligence pipeline | `backend/news_intelligence/` |
+| Ticker-level news intelligence (categories, primary-ticker, clustering, signal build) | `backend/news_intelligence/news_categories.py`, `ticker_registry.py`, `primary_ticker_detector.py`, `news_clusterer.py`, `ticker_signal_builder.py` |
+| `news_events` / `ticker_news_signals` persistence | `backend/app/repositories/news_events_repository.py` |
 | IBKR News provider | `backend/app/services/news_intelligence/` |
 | AI Report | `backend/app/services/ai_report_service.py` |
 | Expiry + Spread Engine | `qqq_spread_analyzer/src/expiry_search_engine.py`, `spread_search_engine.py`, `expiry_spread_orchestrator.py` |
@@ -66,6 +68,7 @@ Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper T
 
 - **User guide:** `README.md`
 - **Architecture spec (canonical):** `Billion-Dollar-Architecture-Reference.md`
+- **UI user SOP (buttons/tables/workflow):** `Billion-Dollar-Architecture-Reference.md` §15
 - **Logic flows + algorithms:** `PSEUDOCODE.md`
 
 ## Mandatory documentation sync (every implementation task)
@@ -132,12 +135,23 @@ POST /api/qqq-spread-analyzer/run
 - IBKR smoke test: `PYTHONPATH=. ../pyenv_global/bin/python` + `IbkrNewsClient().fetch_historical_news("AAPL")`
 - Env keys in `backend/.env.example`: `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `SEC_USER_AGENT`, budget limits
 - IBKR News is optional — if IB Gateway unavailable, pipeline falls back to Finnhub/AV/SEC
-- Provider priority: IBKR > SEC EDGAR > Finnhub > Alpha Vantage (SEC stays authoritative for filings)
-- Source quality weights in `news_config.py`: DJ-N=0.95, DJ-RT/DJNL/BRFUPDN=0.90, BRFG=0.85
+- Provider priority: **IBKR** (primary) > **SEC EDGAR** (official filings) > **Alpha Vantage** (earnings/sentiment fallback) > **Finnhub** (general fallback only; company-news fetch skipped per-symbol when IBKR already covered it this run; Finnhub *general* market news is context-only, never a top catalyst)
+- Source quality weights in `news_config.py`: SEC=1.00, DJ-N=0.95, DJ-RT/DJNL/BRFUPDN=0.90, BRFG=0.85, Finnhub=0.70, AV=0.65
 - **IBKR News client uses native `ibapi`** (callback + thread), client_id **23** — not ib_insync (options/TwsBroker still use ib_insync)
 - Default news providers: `BRFG+BRFUPDN+DJ-N`; wait 8s after reqHistoricalNews; empty results not cached
 - MIC page shows IBKR provider status + regime context read-only from `MarketRegimeService`
-- Not yet wired: skip Finnhub/AV when IBKR succeeds; TDE `news` sub-score → `NewsSignalService`; IBKR reqNewsArticle (Phase 2)
+
+### Ticker-level news intelligence (Parts 1-7, 11 of the redesign)
+
+- Legacy article-level `news_items` pipeline is unchanged/untouched; a second best-effort stage on the same deduped items builds `news_events` (clusters) + `ticker_news_signals` (one row per symbol) — see `PSEUDOCODE.md` §11a and Architecture Reference §11.
+- `primary_ticker_detector.resolve_primary_symbol()` picks the best-matching symbol among an item's candidates (score 0-100); `<40` excluded from ticker scoring, `<60` excluded from top catalyst/risk.
+- `news_categories.classify_event_category()` — 14 canonical categories in strict priority order; legacy `event_type` values preserved via `to_legacy_event_type()` shim.
+- Dedup: headline similarity **0.86** within **72h**. Clustering (coarser): **0.70** default, **0.55** only within same symbol+category+source-family.
+- `NewsSignalService.signal_for_symbol()` reads `ticker_news_signals` first, falls back to legacy per-item aggregation — external dict shape unchanged.
+- `TradeScoreCalculator` news sub-score reads `ticker_news_signals`; falls back to **neutral 50** (not 70) when no signal row exists yet.
+- New endpoint: `GET /api/market-intelligence/ticker-signals`.
+- **Deferred:** OpenAI cluster summaries (Part 8), ticker-level table UI + drawer, revised Opportunity Scanner columns (Parts 9-10) — dashboard still shows raw article rows today.
+- Not yet wired: frontend TDE mirror still uses `risk_notes` regex (not `ticker_news_signals`); IBKR reqNewsArticle (Phase 2); live earnings calendar.
 
 ## Coding constraints
 

@@ -14,7 +14,7 @@ except ModuleNotFoundError:
 if FASTAPI_AVAILABLE:
     from app.config import settings
     from app.main import app
-    from app.routes.spread_analyzer import _qqq_analyzer_data_dir
+    from app.routes.spread_analyzer import _qqq_analyzer_data_dir, _qqq_analysis_path
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi not installed in current interpreter")
@@ -23,6 +23,14 @@ class QqqSpreadAnalyzerApiTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._data_dir = Path(self._tmpdir.name)
         settings.qqq_analyzer_data_dir = str(self._data_dir)
+        import app.routes.spread_analyzer as sa
+
+        self._orig_path_fn = sa._qqq_analysis_path
+
+        def _patched(sym: str) -> Path:
+            return self._data_dir / f"latest_analysis_{sym.strip().upper()}.json"
+
+        sa._qqq_analysis_path = _patched
         self.client = TestClient(app)
         self.fixture = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -38,6 +46,9 @@ class QqqSpreadAnalyzerApiTests(unittest.TestCase):
         }
 
     def tearDown(self):
+        import app.routes.spread_analyzer as sa
+
+        sa._qqq_analysis_path = self._orig_path_fn
         self._tmpdir.cleanup()
         settings.qqq_analyzer_data_dir = ""
 

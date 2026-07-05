@@ -17,6 +17,8 @@ import {
   marketOpenRefresh,
   type MarketOpenRefreshTimestamps,
 } from "@/lib/globalRefreshApi";
+import { getTickerSignals } from "@/lib/marketIntelligenceApi";
+import type { MicTickerSignal } from "@/types/marketIntelligence";
 import {
   DEFAULT_OPPORTUNITY_FILTERS,
   type OpportunityFiltersState,
@@ -53,9 +55,19 @@ export default function OpportunityScannerPage() {
   const [toast, setToast] = useState("");
   const [filters, setFilters] = useState<OpportunityFiltersState>(DEFAULT_OPPORTUNITY_FILTERS);
   const [selected, setSelected] = useState<OpportunityScanRow | null>(null);
+  const [tickerSignals, setTickerSignals] = useState<Map<string, MicTickerSignal>>(new Map());
   const [timestamps, setTimestamps] = useState<MarketOpenRefreshTimestamps | null>(loadSavedTimestamps);
   const [top5Progress, setTop5Progress] = useState<string | null>(null);
   const top5PollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadTickerSignals = useCallback(async () => {
+    try {
+      const signals = await getTickerSignals();
+      setTickerSignals(new Map(signals.map((s) => [s.symbol, s])));
+    } catch {
+      // Ticker-level news signals are supplementary display data only.
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -68,7 +80,8 @@ export default function OpportunityScannerPage() {
     } finally {
       setBusy(null);
     }
-  }, []);
+    void loadTickerSignals();
+  }, [loadTickerSignals]);
 
   useEffect(() => {
     void load();
@@ -169,6 +182,7 @@ export default function OpportunityScannerPage() {
     } finally {
       setBusy(null);
     }
+    void loadTickerSignals();
   }
 
   async function handleExport() {
@@ -313,11 +327,15 @@ export default function OpportunityScannerPage() {
         <>
           <OpportunitySummaryCards summary={data.summary} />
           <OpportunityFilters filters={filters} sectors={sectors} onChange={setFilters} />
-          <OpportunityTable rows={filteredRows} onSelect={setSelected} />
+          <OpportunityTable rows={filteredRows} tickerSignals={tickerSignals} onSelect={setSelected} />
         </>
       )}
 
-      <OpportunityDetailDrawer row={selected} onClose={() => setSelected(null)} />
+      <OpportunityDetailDrawer
+        row={selected}
+        tickerSignal={selected ? tickerSignals.get(selected.symbol) ?? null : null}
+        onClose={() => setSelected(null)}
+      />
     </div>
   );
 }

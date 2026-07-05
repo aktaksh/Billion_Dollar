@@ -25,6 +25,7 @@ class IbkrSyncQuotesTests(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._db_path = Path(self._tmpdir.name) / "test_paper.db"
+        self._orig_database_url = settings.database_url
         settings.database_url = f"sqlite:///{self._db_path}"
         self._client_ctx = TestClient(app)
         self.client = self._client_ctx.__enter__()
@@ -33,6 +34,7 @@ class IbkrSyncQuotesTests(unittest.TestCase):
 
     def tearDown(self):
         self._client_ctx.__exit__(None, None, None)
+        settings.database_url = self._orig_database_url
         self._tmpdir.cleanup()
 
     def test_refresh_market_prices_updates_manual_trade(self):

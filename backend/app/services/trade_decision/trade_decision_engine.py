@@ -16,7 +16,7 @@ class TradeDecisionEngine:
 
     def __init__(self, engine: Engine) -> None:
         self._repo = DecisionRepository(engine)
-        self._calculator = TradeDecisionCalculator()
+        self._calculator = TradeDecisionCalculator(engine=engine)
 
     def record(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now(UTC)

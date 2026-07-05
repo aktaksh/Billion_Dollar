@@ -2,12 +2,15 @@
 
 import Link from "next/link";
 
+import { biasClass } from "@/components/market-intelligence/TickerSignalTable";
+import type { MicTickerSignal } from "@/types/marketIntelligence";
 import type { OpportunityScanRow } from "@/types/opportunityScanner";
 
-import DirectionCandidateBadge, { OpportunityScoreBadge, scoreClass } from "./OpportunityScoreBadge";
+import DirectionCandidateBadge, { OpportunityScoreBadge, readinessBadgeClass, scoreClass } from "./OpportunityScoreBadge";
 
 type Props = {
   rows: OpportunityScanRow[];
+  tickerSignals?: Map<string, MicTickerSignal>;
   onSelect: (row: OpportunityScanRow) => void;
 };
 
@@ -23,7 +26,7 @@ function TechnicalConfidenceBadge({ confidence, hint }: { confidence?: string; h
   );
 }
 
-export default function OpportunityTable({ rows, onSelect }: Props) {
+export default function OpportunityTable({ rows, tickerSignals, onSelect }: Props) {
   if (rows.length === 0) {
     return (
       <section className="panel">
@@ -44,42 +47,47 @@ export default function OpportunityTable({ rows, onSelect }: Props) {
             <tr>
               <th>Rank</th>
               <th>Symbol</th>
-              <th>Direction</th>
               <th className="num">Market Opportunity</th>
+              <th>Direction Bias</th>
+              <th className="num">News Quality</th>
+              <th className="num">Catalyst Strength</th>
               <th>Technical</th>
-              <th className="num">Bull</th>
-              <th className="num">Bear</th>
-              <th className="num">Confidence</th>
+              <th>Trade Readiness</th>
               <th className="num">Risk</th>
-              <th className="num">News</th>
-              <th>Next Earnings</th>
+              <th>News Bias</th>
               <th>Top Catalyst</th>
+              <th>Top Risk</th>
+              <th>Next Earnings</th>
               <th>Reason</th>
               <th>Analyze Live</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {rows.map((row) => {
+              const ticker = tickerSignals?.get(row.symbol);
+              const readiness = row.trade_readiness ?? "Needs Analyze Live";
+              return (
               <tr key={row.symbol} className="os-row-clickable" onClick={() => onSelect(row)}>
                 <td>{row.rank}</td>
                 <td><strong>{row.symbol}</strong></td>
-                <td><DirectionCandidateBadge direction={row.direction_candidate} /></td>
                 <td className="num">
                   <OpportunityScoreBadge score={row.market_opportunity_score ?? row.opportunity_score} />
                 </td>
+                <td><DirectionCandidateBadge direction={row.direction_candidate} /></td>
+                <td className="num">{(row.news_quality_score ?? row.news_score).toFixed(0)}</td>
+                <td className="num">{(row.catalyst_strength_score ?? 0).toFixed(0)}</td>
                 <td>
                   <TechnicalConfidenceBadge
                     confidence={row.technical_confidence}
                     hint={row.technical_hint}
                   />
                 </td>
-                <td className={`num ${scoreClass(row.bull_score)}`}>{row.bull_score.toFixed(0)}</td>
-                <td className={`num ${scoreClass(row.bear_score)}`}>{row.bear_score.toFixed(0)}</td>
-                <td className="num">{row.confidence_score.toFixed(0)}</td>
+                <td><span className={readinessBadgeClass(readiness)}>{readiness}</span></td>
                 <td className={`num ${scoreClass(row.risk_score, true)}`}>{row.risk_score.toFixed(0)}</td>
-                <td className="num">{row.news_score.toFixed(0)}</td>
-                <td>{row.next_earnings ?? "—"}</td>
+                <td>{ticker ? <span className={biasClass(ticker.news_bias)}>{ticker.news_bias}</span> : "—"}</td>
                 <td>{row.top_catalyst ? row.top_catalyst.slice(0, 40) : "—"}</td>
+                <td>{row.top_risk ? row.top_risk.slice(0, 40) : "—"}</td>
+                <td>{row.next_earnings ?? "—"}</td>
                 <td className="reason-cell muted-text">{row.reason}</td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <Link
@@ -91,7 +99,8 @@ export default function OpportunityTable({ rows, onSelect }: Props) {
                   </Link>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
