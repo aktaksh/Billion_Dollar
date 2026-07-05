@@ -373,14 +373,47 @@ PROVIDER PRIORITY (for scoring):
   5. Finnhub (quality=0.70) — fallback news
   6. Alpha Vantage (quality=0.65) — sentiment backup
 
-IBKR NEWS CLIENT:
-  Uses ib_insync (same as TwsBroker)
-  Connects to IB Gateway on tws_host:tws_port with separate client_id
-  reqNewsProviders() → discover available providers
-  reqContractDetails(Stock) → resolve conId
-  reqHistoricalNews(conId, providers, start, end, maxResults) → headlines
-  30-minute in-memory cache per symbol
-  Sequential requests only (no parallel)
+IBKR NEWS CLIENT (ibkr_news_client.py):
+  Library: native ibapi (EClient/EWrapper) — NOT ib_insync
+    ib_insync reqHistoricalNews timed out; ibapi callback pattern matches PlayRough/news.py
+  Python env: pyenv_global (run_local.sh); dependency ibapi in backend/pyproject.toml
+  Client ID: 23 (ibkr_news_client_id) — separate from analyzer 12, paper sync 13
+
+  CLASS _IbkrNewsApi(EWrapper, EClient):
+    callbacks: newsProviders, contractDetails, historicalNews, historicalNewsEnd
+    ignore info farm codes: 2104, 2106, 2107, 2158
+
+  FUNCTION connect():
+    app.connect(host, port, clientId=23)
+    start daemon thread app.run()
+    sleep(2)
+
+  FUNCTION fetch_providers():
+    reqNewsProviders()
+    sleep(4)
+    RETURN provider codes list
+
+  FUNCTION resolve_con_id(symbol):
+    reqContractDetails(1, Contract STK SMART USD)
+    sleep(4)
+    RETURN conId (cached per symbol)
+
+  FUNCTION fetch_historical_news(symbol, lookback=10d, max=20):
+    IF cache hit AND not expired: RETURN cached
+    conId = resolve_con_id(symbol)
+    providers = first 3 from [BRFG, BRFUPDN, DJ-N, ...] that IBKR reports
+    reqHistoricalNews(conId, "BRFG+BRFUPDN+DJ-N", start, end, max)
+    sleep(ibkr_news_wait_seconds)  # default 8s — wait for HMDS/news farm
+    IF headlines empty:
+      RETURN error (do NOT cache)
+    dedupe intra-batch by provider_code + article_id
+    cache successful result (30 min TTL)
+    RETURN IbkrNewsResult
+
+  LIMITS:
+    Market Open Refresh: max 5 stock symbols (skip ETFs)
+    Sequential only; 0.5s pause between symbols
+    Phase 1: headlines only — no reqNewsArticle
 ```
 
 ---
@@ -548,6 +581,9 @@ POST /api/paper-trading/mark/{symbol}
 | Gap | Detail |
 |-----|--------|
 | News → TDE | Frontend uses `risk_notes` regex; not `NewsSignalService` |
+| IBKR → API budget | Pipeline still calls Finnhub/AV/SEC after IBKR even when headlines succeed |
+| IBKR headline quality | Many DJ-N items are market-wide futures columns, not ticker-specific catalysts |
+| IBKR Phase 2 | No reqNewsArticle; no skip-Finnhub-when-IBKR-available optimization |
 | News → Phase 2 catalyst | Static calendar; not reading `news_items` |
 | Phase 2 macro | Yields/DXY stubbed unavailable |
 | Phase 2 multi-TF | 15m / 1H / Weekly placeholders |

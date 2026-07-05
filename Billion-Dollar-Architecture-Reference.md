@@ -342,19 +342,36 @@ Event-driven dashboard: news, SEC filings, catalyst calendar, watchlist, sentime
 | TWS Client | `backend/app/services/news_intelligence/ibkr_news_client.py` |
 | Normalizer/Adapter | `backend/app/services/news_intelligence/ibkr_news_adapter.py` |
 
-**Connection:** Uses `ib_insync` to connect to IB Gateway (same host/port as TwsBroker, separate client ID).
+**Connection:** Native **`ibapi`** (`EClient`/`EWrapper` + daemon thread). **Not** `ib_insync` — ib_insync `reqHistoricalNews` timed out in production; ibapi callback pattern (same as `PlayRough/news.py`) is reliable.
 
-**Available providers:** DJ-N, DJ-RT, DJNL, BRFUPDN, BRFG.
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| Host/port | `127.0.0.1:4001` | Same as `tws_host` / `tws_port` in config |
+| Client ID | **23** | `ibkr_news_client_id` — separate from analyzer (12) and paper sync (13) |
+| Python env | `pyenv_global` | `run_local.sh` sets `VIRTUAL_ENV`; requires `ibapi` package |
+
+**Available providers:** DJ-N, DJ-RT, DJNL, BRFUPDN, BRFG (+ DJ-RTA/RTE/RTG if subscribed).
+
+**Default provider bundle per symbol:** first 3 from `BRFG → BRFUPDN → DJ-N` that IBKR reports available.
 
 **Source quality weights:** DJ-N=0.95, DJ-RT/DJNL/BRFUPDN=0.90, BRFG=0.85 (vs Finnhub=0.70, AV=0.65).
 
+**Fetch sequence (per symbol, sequential):**
+
+1. `connect()` → start message loop thread, sleep 2s
+2. `reqNewsProviders()` → sleep 4s
+3. `reqContractDetails(STK)` → cache conId, sleep 4s
+4. `reqHistoricalNews(conId, "BRFG+BRFUPDN+DJ-N", start, end, 20)` → sleep `ibkr_news_wait_seconds` (8s)
+5. Collect headlines via `historicalNews` callback; empty → error (not cached)
+
 **Behavior:**
-- Market Open Refresh: fetches for top 5 priority watchlist symbols
-- Analyze Live: fetches for selected symbol only
-- Graceful fallback: if IBKR unavailable, pipeline continues with Finnhub/AV/SEC
-- 30-min cache, 10-day lookback, max 20 headlines per symbol
-- Headlines cleaned of metadata tags (`{A:...}` patterns)
+- Market Open Refresh: fetches for top 5 priority watchlist **stocks** (ETFs skipped)
+- Analyze Live: selected symbol only (when wired through pipeline refresh)
+- Graceful fallback: if IBKR unavailable or empty, pipeline continues with Finnhub/AV/SEC
+- 30-min in-memory cache per symbol (successful fetches only)
+- Headlines cleaned of metadata tags (`{A:...}` patterns) before storage
 - IBKR-specific event classification rules for analyst ratings, filings, earnings
+- IBKR does **not** replace Finnhub/AV/SEC in pipeline yet — runs first, then other providers still fetch
 
 ---
 
@@ -380,6 +397,18 @@ Consolidates all module data into structured JSON + Markdown for external AI ana
 
 ## 14. Config and environment
 
+### Python runtime
+
+Backend uses **`pyenv_global`** at repo sibling path (`git_codes/pyenv_global`). `run_local.sh` sets `VIRTUAL_ENV` and runs `poetry install` / `poetry run uvicorn` from that env. Required for `ibapi` (IBKR News).
+
+### IBKR client IDs (one session per ID)
+
+| Use | Client ID | Config |
+|-----|-----------|--------|
+| Spread analyzer | 12 | `qqq_spread_analyzer/.env` |
+| Paper trading sync | 13 | `backend/config.yaml` → `tws_client_id` |
+| IBKR News | 23 | `backend/app/config.py` → `ibkr_news_client_id` |
+
 ### `backend/config.yaml`
 
 | Key | Default | Purpose |
@@ -389,9 +418,11 @@ Consolidates all module data into structured JSON + Markdown for external AI ana
 | `tws_port` | 4001 | IB Gateway port |
 | `database_url` | `sqlite:///./paper_trading.db` | SQLite path |
 | `ibkr_news_enabled` | true | Enable IBKR News provider |
-| `ibkr_news_client_id` | 23 | Separate TWS client ID for news |
+| `ibkr_news_client_id` | 23 | Separate TWS client ID for news (ibapi) |
 | `ibkr_news_cache_ttl_seconds` | 1800 | News cache TTL |
 | `ibkr_news_max_symbols_refresh` | 5 | Max symbols per Market Open Refresh |
+| `ibkr_news_wait_seconds` | 8 | Wait after reqHistoricalNews (HMDS) |
+| `ibkr_news_request_timeout_seconds` | 30 | Reserved config |
 
 ### Environment variables
 
@@ -424,7 +455,8 @@ Consolidates all module data into structured JSON + Markdown for external AI ana
 |-------|--------|
 | Backend | Python 3.12+, FastAPI |
 | Frontend | Next.js, TypeScript |
-| Analyzer | Poetry project, ib_insync, pandas |
+| Analyzer | Poetry project, ib_insync (options chain), pandas |
+| IBKR News | Native ibapi (headlines only) |
 | Primary DB | SQLite (SQLAlchemy) |
 | Analyzer cache | DuckDB |
 | Charts | Recharts |
@@ -436,6 +468,9 @@ Consolidates all module data into structured JSON + Markdown for external AI ana
 | Gap | Detail |
 |-----|--------|
 | News → TDE | Frontend uses `risk_notes` regex; not `NewsSignalService` |
+| IBKR → API budget | IBKR not counted in Finnhub/AV daily limits; pipeline still calls Finnhub/AV/SEC after IBKR |
+| IBKR headline quality | conId fetch includes macro/futures columns mentioning symbol; fuzzy dedup needed for edition dupes |
+| IBKR Phase 2 | No `reqNewsArticle` full-text fetch yet |
 | News → Phase 2 catalyst | Static calendar; not reading `news_items` |
 | Phase 2 macro | Yields/DXY stubbed unavailable |
 | Phase 2 multi-TF | 15m / 1H / Weekly placeholders |

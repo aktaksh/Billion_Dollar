@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from fastapi.testclient import TestClient
@@ -103,11 +104,27 @@ class MarketRegimeApiTests(unittest.TestCase):
 
         self._service = MarketRegimeService(self._engine, analysis_dir_fn=_patched)
         mr_route.set_market_regime_service(self._service)
+
+        class _MockBroker:
+            name = "mock"
+
+            def is_available(self):
+                return False, "mock"
+
+            def fetch_underlying_price(self, symbol: str) -> float:
+                return 0.0
+
+        self._broker_patch = patch(
+            "app.services.market_regime.data_adapters.get_broker_provider",
+            return_value=_MockBroker(),
+        )
+        self._broker_patch.start()
         self.client = TestClient(app)
 
     def tearDown(self):
         import app.routes.spread_analyzer as sa
 
+        self._broker_patch.stop()
         sa._qqq_analysis_path = self._orig_fn
         self._tmpdir.cleanup()
 

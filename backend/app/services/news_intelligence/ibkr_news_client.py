@@ -1,4 +1,4 @@
-"""IBKR News Client — fetches historical headlines via ib_insync TWS API."""
+"""IBKR News Client — fetches historical headlines via native ibapi TWS API."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from ibapi.client import EClient
+from ibapi.contract import Contract
+from ibapi.wrapper import EWrapper
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,10 +22,15 @@ _ib_news_lock = threading.Lock()
 TICKER_PROVIDERS = ("DJ-N", "BRFUPDN")
 MARKET_PROVIDERS = ("BRFG", "DJ-RT", "DJNL")
 ALL_PROVIDERS = TICKER_PROVIDERS + MARKET_PROVIDERS
+# Match PlayRough/news.py: first 3 providers IBKR returns (BRFG+BRFUPDN+DJ-N)
+PREFERRED_PROVIDER_ORDER = ("BRFG", "BRFUPDN", "DJ-N", "DJ-RT", "DJNL", "DJ-RTA", "DJ-RTE", "DJ-RTG")
 
 DEFAULT_LOOKBACK_DAYS = 10
 DEFAULT_MAX_HEADLINES = 20
 CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+# IBKR informational / farm status codes — not errors
+_INFO_ERROR_CODES = frozenset({2104, 2106, 2107, 2158, 2119, 2103, 2105, 2108, 2168})
 
 
 @dataclass
@@ -48,8 +57,50 @@ class _CacheEntry:
     expires_at: float
 
 
+class _IbkrNewsApi(EWrapper, EClient):
+    """Short-lived ibapi session for news provider / contract / headline requests."""
+
+    def __init__(self) -> None:
+        EClient.__init__(self, self)
+        self.providers: list[str] = []
+        self.con_id: int | None = None
+        self.headlines: list[IbkrHeadline] = []
+        self.news_done = False
+        self.last_error: str | None = None
+
+    def error(self, reqId, errorCode, errorString, advancedOrderRejectJson="") -> None:
+        if errorCode in _INFO_ERROR_CODES:
+            logger.debug("IBKR info %s: %s", errorCode, errorString)
+            return
+        msg = f"IBKR error {errorCode}: {errorString}"
+        logger.warning(msg)
+        self.last_error = msg
+
+    def newsProviders(self, providers) -> None:
+        self.providers = [p.code for p in providers] if providers else []
+
+    def contractDetails(self, reqId, contractDetails) -> None:
+        self.con_id = contractDetails.contract.conId
+
+    def historicalNews(self, reqId, timeStamp, providerCode, articleId, headline) -> None:
+        text = (headline or "").strip()
+        if not text:
+            return
+        self.headlines.append(
+            IbkrHeadline(
+                timestamp=str(timeStamp or ""),
+                provider_code=str(providerCode or ""),
+                article_id=str(articleId or ""),
+                headline=text,
+            )
+        )
+
+    def historicalNewsEnd(self, reqId, hasMore) -> None:
+        self.news_done = True
+
+
 class IbkrNewsClient:
-    """Connects to IB Gateway/TWS via ib_insync for historical news."""
+    """Connects to IB Gateway/TWS via native ibapi for historical news."""
 
     def __init__(
         self,
@@ -60,38 +111,38 @@ class IbkrNewsClient:
     ) -> None:
         self._host = host or settings.tws_host
         self._port = port or settings.tws_port
-        self._client_id = client_id or (settings.tws_client_id + 10)
+        self._client_id = client_id or settings.ibkr_news_client_id
         self._cache_ttl = cache_ttl
-        self._ib: Any = None
+        self._app: _IbkrNewsApi | None = None
+        self._thread: threading.Thread | None = None
         self._available_providers: list[str] = []
         self._con_id_cache: dict[str, int] = {}
         self._news_cache: dict[str, _CacheEntry] = {}
         self._connected = False
+        self._news_wait_seconds = settings.ibkr_news_wait_seconds
 
-    def _ensure_ib(self) -> Any:
-        from ib_insync import IB, util
-
-        if self._ib is None:
-            util.startLoop()
-            self._ib = IB()
-        return self._ib
+    def _start_message_loop(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        assert self._app is not None
+        self._thread = threading.Thread(target=self._app.run, daemon=True)
+        self._thread.start()
+        time.sleep(2)
 
     def connect(self) -> bool:
         with _ib_news_lock:
-            if self._connected and self._ib and self._ib.isConnected():
+            if self._connected and self._app and self._app.isConnected():
                 return True
             try:
-                ib = self._ensure_ib()
-                ib.connect(
-                    self._host,
-                    self._port,
-                    clientId=self._client_id,
-                    readonly=True,
-                    timeout=10,
-                )
-                self._connected = True
-                logger.info("IBKR News client connected on %s:%s", self._host, self._port)
-                return True
+                self._app = _IbkrNewsApi()
+                self._app.connect(self._host, self._port, clientId=self._client_id)
+                self._start_message_loop()
+                if self._app.isConnected():
+                    self._connected = True
+                    logger.info("IBKR News client connected on %s:%s", self._host, self._port)
+                    return True
+                self._connected = False
+                return False
             except Exception as exc:
                 logger.warning("IBKR News connection failed: %s", exc)
                 self._connected = False
@@ -99,11 +150,13 @@ class IbkrNewsClient:
 
     def disconnect(self) -> None:
         with _ib_news_lock:
-            if self._ib and self._ib.isConnected():
+            if self._app and self._app.isConnected():
                 try:
-                    self._ib.disconnect()
+                    self._app.disconnect()
                 except Exception:
                     pass
+            self._app = None
+            self._thread = None
             self._connected = False
 
     def is_available(self) -> tuple[bool, str]:
@@ -115,13 +168,14 @@ class IbkrNewsClient:
             return False, f"IBKR News unavailable: {exc}"
 
     def fetch_providers(self) -> list[str]:
-        if not self.connect():
+        if not self.connect() or not self._app:
             return []
         with _ib_news_lock:
             try:
-                providers = self._ib.reqNewsProviders()
-                self._ib.sleep(1)
-                self._available_providers = [p.code for p in providers] if providers else []
+                self._app.providers = []
+                self._app.reqNewsProviders()
+                time.sleep(4)
+                self._available_providers = list(self._app.providers)
                 logger.info("IBKR News providers: %s", self._available_providers)
                 return self._available_providers
             except Exception as exc:
@@ -139,20 +193,22 @@ class IbkrNewsClient:
         if sym in self._con_id_cache:
             return self._con_id_cache[sym]
 
-        if not self.connect():
+        if not self.connect() or not self._app:
             return None
-
-        from ib_insync import Stock
 
         with _ib_news_lock:
             try:
-                contract = Stock(sym, "SMART", "USD")
-                details = self._ib.reqContractDetails(contract)
-                self._ib.sleep(1)
-                if details:
-                    con_id = details[0].contract.conId
-                    self._con_id_cache[sym] = con_id
-                    return con_id
+                contract = Contract()
+                contract.symbol = sym
+                contract.secType = "STK"
+                contract.exchange = "SMART"
+                contract.currency = "USD"
+                self._app.con_id = None
+                self._app.reqContractDetails(1, contract)
+                time.sleep(4)
+                if self._app.con_id:
+                    self._con_id_cache[sym] = self._app.con_id
+                    return self._app.con_id
                 logger.warning("No contract details for %s", sym)
                 return None
             except Exception as exc:
@@ -169,6 +225,8 @@ class IbkrNewsClient:
         return None
 
     def _set_cache(self, result: IbkrNewsResult) -> None:
+        if result.error or not result.headlines:
+            return
         key = result.symbol.upper()
         self._news_cache[key] = _CacheEntry(
             result=result,
@@ -190,7 +248,7 @@ class IbkrNewsClient:
             logger.debug("IBKR News cache hit for %s", sym)
             return cached
 
-        if not self.connect():
+        if not self.connect() or not self._app:
             return IbkrNewsResult(symbol=sym, con_id=None, error="IBKR unavailable")
 
         con_id = self._resolve_con_id(sym)
@@ -201,8 +259,10 @@ class IbkrNewsClient:
         if not available:
             return IbkrNewsResult(symbol=sym, con_id=con_id, error="No news providers available")
 
-        codes = provider_codes or list(TICKER_PROVIDERS)
-        valid_codes = [c for c in codes if c in available]
+        if provider_codes:
+            valid_codes = [c for c in provider_codes if c in available]
+        else:
+            valid_codes = [c for c in PREFERRED_PROVIDER_ORDER if c in available][:3]
         if not valid_codes:
             valid_codes = [c for c in ALL_PROVIDERS if c in available][:3]
         if not valid_codes:
@@ -216,28 +276,38 @@ class IbkrNewsClient:
 
         with _ib_news_lock:
             try:
-                headlines_raw = self._ib.reqHistoricalNews(
-                    con_id,
-                    providers_str,
-                    start_dt.strftime("%Y%m%d %H:%M:%S"),
-                    end_dt.strftime("%Y%m%d %H:%M:%S"),
-                    max_headlines,
+                self._app.headlines = []
+                self._app.news_done = False
+                self._app.last_error = None
+                self._app.reqHistoricalNews(
+                    reqId=2,
+                    conId=con_id,
+                    providerCodes=providers_str,
+                    startDateTime=start_dt.strftime("%Y%m%d %H:%M:%S"),
+                    endDateTime=end_dt.strftime("%Y%m%d %H:%M:%S"),
+                    totalResults=max_headlines,
+                    historicalNewsOptions=[],
                 )
-                self._ib.sleep(2)
+                time.sleep(self._news_wait_seconds)
             except Exception as exc:
                 return IbkrNewsResult(
                     symbol=sym, con_id=con_id, error=f"reqHistoricalNews failed: {exc}"
                 )
 
-        headlines: list[IbkrHeadline] = []
-        if headlines_raw:
-            for h in headlines_raw:
-                headlines.append(IbkrHeadline(
-                    timestamp=str(getattr(h, "time", "") or ""),
-                    provider_code=str(getattr(h, "providerCode", "") or ""),
-                    article_id=str(getattr(h, "articleId", "") or ""),
-                    headline=str(getattr(h, "headline", "") or ""),
-                ))
+        headlines = list(self._app.headlines[:max_headlines])
+
+        if not headlines:
+            err = self._app.last_error or (
+                f"reqHistoricalNews returned no headlines for {sym} "
+                f"(providers={providers_str})"
+            )
+            return IbkrNewsResult(
+                symbol=sym,
+                con_id=con_id,
+                headlines=[],
+                providers_used=valid_codes,
+                error=err,
+            )
 
         result = IbkrNewsResult(
             symbol=sym,

@@ -32,6 +32,8 @@ class AppConfig(BaseModel):
     ibkr_news_lookback_days: int = 10
     ibkr_news_max_headlines: int = 20
     ibkr_news_max_symbols_refresh: int = 5
+    ibkr_news_request_timeout_seconds: float = 30.0
+    ibkr_news_wait_seconds: float = 8.0
 
     # Stale data thresholds (minutes)
     technical_stale_minutes: int = 60

@@ -50,8 +50,9 @@ Failed runs log to `qqq_spread_analyzer/data/analyzer_last_run.log` (wiped each 
 |-----|-----------|--------|
 | Spread analyzer (CLI + API subprocess) | **12** | `qqq_spread_analyzer/.env` → `IB_CLIENT_ID=12` |
 | Paper Trading Lab IBKR sync | **13** | `backend/config.yaml` → `tws_client_id: 13` |
+| IBKR News (Market Intelligence) | **23** | `backend/app/config.py` → `ibkr_news_client_id: 23` |
 
-Use different client IDs so analyzer runs and paper sync can coexist without IB error 326.
+Use different client IDs so analyzer runs, paper sync, and news fetch can coexist without IB error 326.
 
 ## API
 
@@ -188,6 +189,27 @@ Available IBKR news providers:
 
 Limits: max 5 symbols during Market Open Refresh, 30-minute cache TTL, 10-day lookback, 20 headlines per symbol.
 
+**Implementation:** Native `ibapi` (not `ib_insync`) — callback + thread pattern matching `PlayRough/news.py`. Default providers per request: `BRFG+BRFUPDN+DJ-N`. Waits 8s after `reqHistoricalNews` for HMDS/news farm. Empty results are not cached; pipeline falls back to Finnhub/AV/SEC.
+
+**Manual smoke test (requires IB Gateway on 4001):**
+
+```bash
+cd backend
+PYTHONPATH=. ../pyenv_global/bin/python <<'EOF'
+from app.services.news_intelligence.ibkr_news_client import IbkrNewsClient
+from app.services.news_intelligence.ibkr_news_adapter import normalize_ibkr_result, clean_headline
+client = IbkrNewsClient()
+print(client.is_available())
+result = client.fetch_historical_news("AAPL", lookback_days=10, max_headlines=20)
+print(f"headlines={len(result.headlines)} error={result.error}")
+for item in normalize_ibkr_result(result)[:5]:
+    print(f"  [{item.source}] {clean_headline(item.headline)[:100]}")
+client.disconnect()
+EOF
+```
+
+Backend runs via `run_local.sh` using Poetry + `pyenv_global` (`../pyenv_global`). Dependency: `ibapi` in `backend/pyproject.toml`.
+
 ## CLI (optional)
 
 ```bash
@@ -233,6 +255,8 @@ tws_port: 4001
 | `ibkr_news_lookback_days` | 10 | Historical news window |
 | `ibkr_news_max_headlines` | 20 | Max headlines per symbol |
 | `ibkr_news_max_symbols_refresh` | 5 | Max symbols during Market Open Refresh |
+| `ibkr_news_request_timeout_seconds` | 30 | Reserved; native ibapi uses fixed wait below |
+| `ibkr_news_wait_seconds` | 8 | Seconds to wait after reqHistoricalNews (HMDS farm) |
 
 ### Environment overrides
 

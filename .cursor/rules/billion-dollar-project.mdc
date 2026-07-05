@@ -72,6 +72,15 @@ Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper T
 
 **Do not mark a task complete until docs are updated when the change affects behavior, APIs, config, UI, or data flow.**
 
+Agents must **continuously** update canonical docs as part of the same task — not as a follow-up:
+
+1. **`Billion-Dollar-Architecture-Reference.md`** — structure, modules, config, data flow, IBKR/broker details
+2. **`PSEUDOCODE.md`** — algorithms, pipeline steps, pseudocode for new/changed logic
+3. **`README.md`** — user-facing behavior, API routes, env vars, smoke-test commands
+4. **`.cursor/rules/billion-dollar-project.mdc`** — repo map, client IDs, module boundaries when paths or roles change
+
+Do not create duplicate architecture files. Remove or merge outdated docs instead.
+
 ### Documentation completion checklist (agent)
 
 ```text
@@ -79,6 +88,7 @@ Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper T
 [ ] Billion-Dollar-Architecture-Reference.md updated OR N/A
 [ ] PSEUDOCODE.md updated OR N/A
 [ ] README.md updated if user-facing behavior changed
+[ ] .cursor/rules/billion-dollar-project.mdc updated if repo map / broker / module boundaries changed
 [ ] No new duplicate architecture/pseudocode files created
 ```
 
@@ -90,10 +100,12 @@ Market Open Refresh → Opportunity Scanner → Analyze Live → TDE → Paper T
 |-----|-----------|--------|
 | Spread analyzer CLI + API subprocess | **12** | `qqq_spread_analyzer/.env` → `IB_CLIENT_ID=12` |
 | Paper Trading Lab IBKR sync | **13** | `backend/config.yaml` → `tws_client_id: 13` |
+| IBKR News (Market Intelligence) | **23** | `backend/app/config.py` → `ibkr_news_client_id: 23` |
 
 - **One client ID per IB session** — error 326 if two processes share the same ID.
 - Analyzer runs are triggered manually via UI; no auto-connect on backend startup for analysis.
 - IB Gateway port **4001** (default in both configs).
+- Backend Python env: **`pyenv_global`** via `run_local.sh` (`GIT_CODES/pyenv_global`).
 
 ### Analysis data flow
 
@@ -114,16 +126,18 @@ POST /api/qqq-spread-analyzer/run
 ## News Intelligence
 
 - **Pipeline:** `backend/news_intelligence/` (CLI smoke test still available)
-- **IBKR News:** `backend/app/services/news_intelligence/` (ibkr_news_client.py + ibkr_news_adapter.py)
+- **IBKR News:** `backend/app/services/news_intelligence/` (`ibkr_news_client.py` + `ibkr_news_adapter.py`)
 - **HTTP:** `/api/market-intelligence/*` (full dashboard) + `/api/news-intelligence/*` (QQQ embed)
 - Run CLI: `cd backend && PYTHONPATH=. poetry run python -m news_intelligence.test_news_fetch`
+- IBKR smoke test: `PYTHONPATH=. ../pyenv_global/bin/python` + `IbkrNewsClient().fetch_historical_news("AAPL")`
 - Env keys in `backend/.env.example`: `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `SEC_USER_AGENT`, budget limits
 - IBKR News is optional — if IB Gateway unavailable, pipeline falls back to Finnhub/AV/SEC
 - Provider priority: IBKR > SEC EDGAR > Finnhub > Alpha Vantage (SEC stays authoritative for filings)
 - Source quality weights in `news_config.py`: DJ-N=0.95, DJ-RT/DJNL/BRFUPDN=0.90, BRFG=0.85
-- IBKR News client uses `ib_insync`, same pattern as `TwsBroker` but separate client_id (23)
+- **IBKR News client uses native `ibapi`** (callback + thread), client_id **23** — not ib_insync (options/TwsBroker still use ib_insync)
+- Default news providers: `BRFG+BRFUPDN+DJ-N`; wait 8s after reqHistoricalNews; empty results not cached
 - MIC page shows IBKR provider status + regime context read-only from `MarketRegimeService`
-- Not yet wired: TDE `news` sub-score → `NewsSignalService`; live Finnhub earnings calendar; IBKR reqNewsArticle (Phase 2)
+- Not yet wired: skip Finnhub/AV when IBKR succeeds; TDE `news` sub-score → `NewsSignalService`; IBKR reqNewsArticle (Phase 2)
 
 ## Coding constraints
 
